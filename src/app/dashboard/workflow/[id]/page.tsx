@@ -123,28 +123,37 @@ export default function WorkflowDetailPage() {
     fetchWorkflow();
   }, [workflowId]);
 
-  // Simulate progress during execution
-  useEffect(() => {
-    if (!isRunning) return;
-    const interval = setInterval(() => {
-      setProgress((prev) => {
-        if (prev >= 90) return prev;
-        return prev + Math.random() * 8;
-      });
-    }, 800);
-    return () => clearInterval(interval);
-  }, [isRunning]);
+  // Progress is now driven by real agent completion — no fake simulation needed
 
-  // Execute workflow
+  // Helper to safely parse JSON from a fetch response (handles timeout/502 HTML responses)
+  const safeJsonParse = async (response: Response) => {
+    const text = await response.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      // If Vercel returns an HTML error page (502/504 timeout), extract a useful message
+      if (text.includes("<!") || text.includes("<html")) {
+        throw new Error("Request timed out. Please try again with a simpler prompt.");
+      }
+      throw new Error(`Unexpected response: ${text.slice(0, 100)}`);
+    }
+  };
+
+  // Execute workflow — split architecture to avoid Vercel 60s timeout
+  // Phase 1: Call /execute to get the agent plan (~3s)
+  // Phase 2: Call /agent for each agent in parallel (~10-20s each)
   const handleRun = useCallback(async () => {
     if (!workflow) return;
     setIsRunning(true);
     setLogs([]);
     setResults({});
     setProgress(0);
+    setAgents([]);
 
     try {
-      const response = await fetch("/api/workflow/execute", {
+      // Phase 1: Conductor — get agent plan
+      setProgress(5);
+      const executeRes = await fetch("/api/workflow/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -153,14 +162,113 @@ export default function WorkflowDetailPage() {
         }),
       });
 
-      const data = await response.json();
+      const executeData = await safeJsonParse(executeRes);
+      if (!executeRes.ok) throw new Error(executeData.error || "Failed to plan workflow");
 
-      if (!response.ok) throw new Error(data.error || "Execution failed");
+      const { runId: newRunId, agents: plannedAgents, title } = executeData;
+      setRunId(newRunId);
 
-      setRunId(data.runId);
-      setAgents(data.agents || []);
-      setLogs(data.logs || []);
-      setResults(data.results || {});
+      // Show agents immediately as "running"
+      const runningAgents = (plannedAgents || []).map((a: Agent) => ({ ...a, status: "running" }));
+      setAgents(runningAgents);
+      setWorkflow((prev) => prev ? { ...prev, title: title || prev.title, status: "running" } : prev);
+      setProgress(15);
+
+      // Add conductor log
+      setLogs([{
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        agentId: "conductor",
+        agentName: "Conductor",
+        message: `Assembled ${runningAgents.length} agents. Executing in parallel...`,
+        type: "success",
+      }]);
+
+      // Phase 2: Execute each agent in parallel via /api/workflow/agent
+      const totalAgents = runningAgents.length;
+      let completedCount = 0;
+      const newResults: Record<string, string> = {};
+
+      const agentPromises = runningAgents.map(async (agent: Agent) => {
+        try {
+          const agentRes = await fetch("/api/workflow/agent", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              workflowId: workflow.id,
+              runId: newRunId,
+              agent,
+              description: workflow.description,
+            }),
+          });
+
+          const agentData = await safeJsonParse(agentRes);
+
+          if (!agentRes.ok) {
+            throw new Error(agentData.error || "Agent failed");
+          }
+
+          // Update this agent to completed
+          newResults[agent.id] = agentData.result;
+          completedCount++;
+
+          setAgents((prev) =>
+            prev.map((a) =>
+              a.id === agent.id ? { ...a, status: "completed", result: agentData.result } : a
+            )
+          );
+          setResults((prev) => ({ ...prev, [agent.id]: agentData.result }));
+          setLogs((prev) => [...prev, ...(agentData.logs || [])]);
+
+          // Update progress: 15% (conductor) + 85% split across agents
+          const agentProgress = 15 + (completedCount / totalAgents) * 85;
+          setProgress(agentProgress);
+        } catch (agentErr: any) {
+          completedCount++;
+          setAgents((prev) =>
+            prev.map((a) =>
+              a.id === agent.id ? { ...a, status: "error", error: agentErr.message } : a
+            )
+          );
+          setLogs((prev) => [
+            ...prev,
+            {
+              id: crypto.randomUUID(),
+              timestamp: new Date().toISOString(),
+              agentId: agent.id,
+              agentName: agent.name,
+              message: `Error: ${agentErr.message}`,
+              type: "error" as const,
+            },
+          ]);
+          const agentProgress = 15 + (completedCount / totalAgents) * 85;
+          setProgress(agentProgress);
+        }
+      });
+
+      await Promise.all(agentPromises);
+
+      // Phase 3: Finalize — update workflow status in DB
+      const supabase = createClient();
+      await supabase
+        .from("workflows")
+        .update({
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", workflow.id);
+
+      // Update run record as completed
+      await supabase
+        .from("workflow_runs")
+        .update({
+          status: "completed",
+          result: JSON.stringify(newResults),
+          completed_at: new Date().toISOString(),
+        })
+        .eq("id", newRunId);
+
       setWorkflow((prev) => prev ? { ...prev, status: "completed" } : prev);
       setProgress(100);
       toast.success("Workflow completed!");
