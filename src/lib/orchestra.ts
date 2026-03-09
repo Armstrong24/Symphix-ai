@@ -2,30 +2,27 @@
 // Symphix Orchestra — LangGraph.js Agent Orchestration
 // The conductor that turns one prompt into a team of agents
 // Now with REAL tool-calling: web search, email, scheduling, etc.
-// Optimized for Vercel 60s timeout: fast models, reduced tokens, parallel execution
+// Optimized for Vercel 60s timeout + Groq free tier rate limits
 // ============================================
 
 import { ChatGroq } from "@langchain/groq";
-import { HumanMessage, SystemMessage, AIMessage, ToolMessage } from "@langchain/core/messages";
+import { HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
 import type { AgentType, Agent, LogEntry } from "@/types";
 import { AGENT_CONFIG } from "@/types";
 import { getToolsForAgent } from "@/lib/tools";
 
-// Initialize Groq LLM — use fast 8B model for conductor, 70B for agents
-function getConductorLLM() {
+// ============================================
+// LLM Setup — Use 8B model for EVERYTHING
+// The 70B model has very tight Groq free-tier rate limits
+// (6K tokens/min) which causes 429 errors with parallel agents.
+// The 8B model has 131K tokens/min — 20x more headroom.
+// ============================================
+
+function getLLM() {
   return new ChatGroq({
     apiKey: process.env.GROQ_API_KEY,
     model: "llama-3.1-8b-instant",
-    temperature: 0.1,
-    maxTokens: 1024,
-  });
-}
-
-function getAgentLLM() {
-  return new ChatGroq({
-    apiKey: process.env.GROQ_API_KEY,
-    model: "llama-3.3-70b-versatile",
     temperature: 0.3,
     maxTokens: 2048,
   });
@@ -34,6 +31,60 @@ function getAgentLLM() {
 // Generate a simple UUID using crypto
 function generateId(): string {
   return crypto.randomUUID();
+}
+
+// ============================================
+// Retry helper — handles Groq 429 rate limit errors
+// ============================================
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 2,
+  baseDelay: number = 2000
+): Promise<T> {
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      lastError = error;
+      const isRateLimit =
+        error?.status === 429 ||
+        error?.message?.includes("429") ||
+        error?.message?.includes("rate limit") ||
+        error?.message?.includes("Rate limit");
+      
+      if (isRateLimit && attempt < maxRetries) {
+        // Exponential backoff: 2s, 4s
+        const delay = baseDelay * Math.pow(2, attempt);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
+// ============================================
+// Timeout helper — prevents any single operation from hanging
+// ============================================
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms / 1000}s`));
+    }, ms);
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
 }
 
 // ============================================
@@ -50,45 +101,61 @@ interface ConductorResult {
 }
 
 export async function conductorAnalyze(description: string): Promise<ConductorResult> {
-  const llm = getConductorLLM();
+  const llm = getLLM();
 
   const systemPrompt = `You are the Symphix Conductor. Break down user requests into specialized AI agents.
 
 Available agents: email, research, scheduler, social, writer, analyst
 
-Output JSON:
-{"agents":[{"type":"agent_type","task":"brief_task"}],"execution_order":"parallel"|"sequential","title":"3-6 word title"}
+Output ONLY valid JSON (no markdown, no code fences, no explanation):
+{"agents":[{"type":"agent_type","task":"brief_task"}],"execution_order":"parallel","title":"3-6 word title"}
 
 Rules:
 - Use 1-3 agents max (fewer = faster)
-- Prefer "parallel" unless agents truly depend on each other
-- Keep task descriptions under 20 words
+- Always use "parallel" for execution_order
+- Keep task descriptions under 15 words
 - ONLY output valid JSON, nothing else`;
 
-  const response = await llm.invoke([
-    new SystemMessage(systemPrompt),
-    new HumanMessage(description),
-  ]);
-
   try {
+    const response = await withRetry(() =>
+      withTimeout(
+        llm.invoke([
+          new SystemMessage(systemPrompt),
+          new HumanMessage(description),
+        ]),
+        15000, // 15s timeout for conductor
+        "Conductor"
+      )
+    );
+
     const content = typeof response.content === "string" ? response.content : "";
     const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON found in conductor response");
+    if (!jsonMatch) throw new Error("No JSON found");
     const result = JSON.parse(jsonMatch[0]);
 
-    // Cap agents at 3 to stay within timeout
+    // Cap agents at 3
     if (result.agents && result.agents.length > 3) {
       result.agents = result.agents.slice(0, 3);
     }
 
+    // Validate agent types
+    const validTypes = ["email", "research", "scheduler", "social", "writer", "analyst"];
+    result.agents = (result.agents || []).filter(
+      (a: any) => a.type && validTypes.includes(a.type) && a.task
+    );
+
+    if (result.agents.length === 0) {
+      throw new Error("No valid agents parsed");
+    }
+
     return result;
-  } catch (err) {
+  } catch {
     return {
       agents: [
-        { type: "research", task: "Research and gather relevant information" },
-        { type: "writer", task: "Draft the content based on research" },
+        { type: "research", task: "Research the topic thoroughly" },
+        { type: "writer", task: "Write a comprehensive response" },
       ],
-      execution_order: "sequential",
+      execution_order: "parallel",
       title: "Custom Workflow",
     };
   }
@@ -116,76 +183,37 @@ export function buildAgents(conductorResult: ConductorResult): Agent[] {
 
 // ============================================
 // Step 3: Execute individual agent WITH tool-calling
-// Each agent binds its specific tools and runs an agentic loop
-// Optimized: max 3 tool iterations, concise prompts
+// Max 2 tool iterations to stay fast. 45s hard timeout.
 // ============================================
 
 const agentSystemPrompts: Record<string, string> = {
-  email: `You are an expert Email Agent in the Symphix orchestra. You draft professional, concise emails and can send them using the send_email tool.
+  email: `You are the Symphix Email Agent. Draft professional emails.
+Use draft_email tool to create structured email drafts.
+Use send_email tool only if explicitly asked to send.
+After tool use, provide a clean summary.`,
 
-Your capabilities:
-- Draft emails with proper formatting, subject lines, and professional tone
-- Send emails directly using the send_email tool (if configured)
-- Create draft emails for review using the draft_email tool
+  research: `You are the Symphix Research Agent. Find real-time information from the web.
+ALWAYS use the web_search tool first — do NOT rely on training data alone.
+Cite sources with URLs. Structure output with headings and key findings.`,
 
-Always use the appropriate tool. If asked to send an email, use send_email. If asked to draft/compose, use draft_email.
-After using a tool, summarize the result clearly for the user.`,
+  scheduler: `You are the Symphix Scheduler Agent. Manage calendar events.
+Use create_calendar_event to create events with all details.
+Use suggest_meeting_times for optimal scheduling.`,
 
-  research: `You are an expert Research Agent in the Symphix orchestra. You search the internet for real-time information and synthesize findings.
+  social: `You are the Symphix Social Media Agent. Create platform-optimized content.
+Use create_social_post for individual posts (handles character limits).
+Use create_content_plan for multi-day calendars.`,
 
-Your capabilities:
-- Search the web using the web_search tool for current information
-- Extract content from specific URLs using the web_extract tool
-- Synthesize findings into clear, cited reports
+  writer: `You are the Symphix Writer Agent. Create polished content.
+Use write_content tool first to get format guidelines, then write the full content.
+Produce ready-to-publish content with proper markdown formatting.`,
 
-IMPORTANT: Always use the web_search tool to find information. Do NOT rely on your training data alone.
-When presenting results, always cite your sources with URLs.
-Structure your output with clear headings, key findings, and actionable insights.`,
+  analyst: `You are the Symphix Analyst Agent. Analyze data and deliver insights.
+Use calculate for math, analyze_data for frameworks, compare for comparisons.
+Present findings with executive summary, key metrics, and recommendations.`,
 
-  scheduler: `You are an expert Scheduling Agent in the Symphix orchestra. You manage calendar events and find optimal meeting times.
-
-Your capabilities:
-- Create calendar events with the create_calendar_event tool (generates ICS files)
-- Suggest optimal meeting times using the suggest_meeting_times tool
-- Handle timezone conversions and scheduling logistics
-
-Always use the tools to create structured event data. Include all relevant details like location, attendees, and reminders.`,
-
-  social: `You are an expert Social Media Agent in the Symphix orchestra. You create platform-optimized content for social media.
-
-Your capabilities:
-- Create optimized posts using the create_social_post tool (handles character limits, hashtags)
-- Build content calendars using the create_content_plan tool
-- Tailor content for specific platforms (Twitter, LinkedIn, Instagram, etc.)
-
-Always use the tools to ensure proper formatting and platform compliance.
-Create engaging, on-brand content that drives engagement.`,
-
-  writer: `You are an expert Content Writer Agent in the Symphix orchestra. You create compelling content for any format.
-
-Your capabilities:
-- Structure content using the write_content tool (gets format guidelines)
-- Rewrite or transform existing content using the rewrite_content tool
-- Write blog posts, articles, reports, newsletters, landing page copy, and more
-
-Use the write_content tool first to get the proper structure, then write the full content following those guidelines.
-Produce polished, ready-to-publish content with proper formatting.`,
-
-  analyst: `You are an expert Data Analyst Agent in the Symphix orchestra. You analyze data, identify patterns, and deliver insights.
-
-Your capabilities:
-- Perform calculations using the calculate tool
-- Structure analysis reports using the analyze_data tool
-- Create comparisons using the compare tool
-
-Use the tools to support your analysis with concrete numbers and frameworks.
-Present findings with clear structure: executive summary, key metrics, analysis, and recommendations.
-Use markdown tables and bullet points for clarity.`,
-
-  custom: `You are a specialized AI Agent in the Symphix orchestra. Complete the assigned task thoroughly using all available tools.
-
-Use web_search if you need to find information. Use write_content if you need to produce written output.
-Be specific and actionable in your output.`,
+  custom: `You are a Symphix AI Agent. Complete the task using available tools.
+Be specific and actionable. Use tools when helpful.`,
 };
 
 export async function executeAgent(
@@ -194,7 +222,7 @@ export async function executeAgent(
   previousResults: string[],
   onLog: (log: LogEntry) => void
 ): Promise<string> {
-  const llm = getAgentLLM();
+  const llm = getLLM();
   const tools = getToolsForAgent(agent.type);
 
   const makeLog = (message: string, type: LogEntry["type"] = "info"): LogEntry => ({
@@ -206,17 +234,14 @@ export async function executeAgent(
     type,
   });
 
-  onLog(makeLog(`Starting task: ${agent.description}`, "info"));
+  onLog(makeLog(`Starting: ${agent.description}`, "info"));
 
   const systemPrompt = agentSystemPrompts[agent.type] || agentSystemPrompts.custom;
 
-  // Only pass a brief summary of previous results (not full text) to save tokens
   const contextMessage =
     previousResults.length > 0
-      ? `\n\nContext from previous agents (summary):\n${previousResults.map((r) => r.slice(0, 500)).join("\n---\n")}`
+      ? `\n\nContext from other agents:\n${previousResults.map((r) => r.slice(0, 300)).join("\n---\n")}`
       : "";
-
-  onLog(makeLog("Analyzing task requirements...", "thinking"));
 
   try {
     const llmWithTools = tools.length > 0 ? llm.bindTools(tools) : llm;
@@ -224,19 +249,27 @@ export async function executeAgent(
     const messages: BaseMessage[] = [
       new SystemMessage(systemPrompt),
       new HumanMessage(
-        `Workflow: ${workflowDescription}\n\nYour task: ${agent.description}${contextMessage}\n\nComplete this task now. Use tools when needed. Be concise but thorough.`
+        `Task: ${agent.description}\nContext: ${workflowDescription}${contextMessage}\n\nComplete this task now. Be concise but thorough.`
       ),
     ];
 
-    // Agentic loop — max 3 iterations (down from 8) to stay within timeout
+    // Agentic loop — max 2 iterations to stay within timeout
     let iterations = 0;
-    const maxIterations = 3;
+    const maxIterations = 2;
     let finalResponse = "";
 
     while (iterations < maxIterations) {
       iterations++;
 
-      const response = await llmWithTools.invoke(messages);
+      onLog(makeLog(iterations === 1 ? "Thinking..." : "Processing tool results...", "thinking"));
+
+      const response = await withRetry(() =>
+        withTimeout(
+          llmWithTools.invoke(messages),
+          30000, // 30s per LLM call
+          `${agent.name} LLM call`
+        )
+      );
       messages.push(response);
 
       const toolCalls = response.tool_calls;
@@ -246,67 +279,86 @@ export async function executeAgent(
         break;
       }
 
-      // Execute each tool call
-      for (const toolCall of toolCalls) {
+      // Execute tool calls (limit to first 2 tools per iteration)
+      const callsToProcess = toolCalls.slice(0, 2);
+      for (const toolCall of callsToProcess) {
         const toolName = toolCall.name;
         const toolArgs = toolCall.args;
 
         onLog(makeLog(`Using tool: ${toolName}`, "tool_call"));
 
-        // Find the matching tool and invoke it
         const matchedTool = tools.find((t) => t.name === toolName);
         if (!matchedTool) {
-          const errorResult = JSON.stringify({ error: `Tool ${toolName} not found` });
-          messages.push(new ToolMessage({ content: errorResult, tool_call_id: toolCall.id! }));
+          messages.push(
+            new ToolMessage({
+              content: JSON.stringify({ error: `Tool ${toolName} not found` }),
+              tool_call_id: toolCall.id!,
+            })
+          );
           onLog(makeLog(`Tool not found: ${toolName}`, "error"));
           continue;
         }
 
         try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const toolResult = await (matchedTool as any).invoke(toolArgs);
+          const toolResult = await withTimeout(
+            (matchedTool as any).invoke(toolArgs),
+            15000, // 15s timeout per tool
+            `Tool ${toolName}`
+          );
           const resultStr = typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult);
           messages.push(new ToolMessage({ content: resultStr, tool_call_id: toolCall.id! }));
-
-          // Parse for user-friendly log
-          try {
-            const parsed = JSON.parse(resultStr);
-            if (parsed.success) {
-              onLog(makeLog(`Tool ${toolName} completed successfully`, "success"));
-            } else {
-              onLog(makeLog(`Tool ${toolName}: ${parsed.error || parsed.message || "completed with warnings"}`, "info"));
-            }
-          } catch {
-            onLog(makeLog(`Tool ${toolName} returned results`, "info"));
-          }
+          onLog(makeLog(`Tool ${toolName} completed`, "success"));
         } catch (toolError: any) {
-          const errorMsg = toolError.message || "Tool execution failed";
-          const errorResult = JSON.stringify({ error: errorMsg });
-          messages.push(new ToolMessage({ content: errorResult, tool_call_id: toolCall.id! }));
+          const errorMsg = toolError.message || "Tool failed";
+          messages.push(
+            new ToolMessage({
+              content: JSON.stringify({ error: errorMsg }),
+              tool_call_id: toolCall.id!,
+            })
+          );
           onLog(makeLog(`Tool error: ${errorMsg}`, "error"));
         }
       }
+
+      // If there were tool calls we didn't process, add error messages for them
+      for (const skippedCall of toolCalls.slice(2)) {
+        messages.push(
+          new ToolMessage({
+            content: JSON.stringify({ error: "Skipped — tool call limit reached" }),
+            tool_call_id: skippedCall.id!,
+          })
+        );
+      }
     }
 
+    // If loop ended without a final text response, ask for summary
     if (!finalResponse) {
-      messages.push(
-        new HumanMessage("Provide your final summary now. Be concise.")
+      const summaryResponse = await withRetry(() =>
+        withTimeout(
+          llm.invoke([...messages, new HumanMessage("Summarize your work concisely.")]),
+          15000,
+          `${agent.name} summary`
+        )
       );
-      const summaryResponse = await llm.invoke(messages);
-      finalResponse = typeof summaryResponse.content === "string" ? summaryResponse.content : "Task completed.";
+      finalResponse =
+        typeof summaryResponse.content === "string"
+          ? summaryResponse.content
+          : "Task completed.";
     }
 
-    onLog(makeLog("Task completed successfully!", "success"));
+    onLog(makeLog("Completed!", "success"));
     return finalResponse;
   } catch (error: any) {
-    const errorMsg = error.message || "Unknown error occurred";
+    const errorMsg = error.message || "Unknown error";
     onLog(makeLog(`Error: ${errorMsg}`, "error"));
-    throw error;
+    // Return a partial result instead of throwing — keeps the workflow alive
+    return `Agent encountered an error: ${errorMsg}. The task "${agent.description}" could not be fully completed.`;
   }
 }
 
 // ============================================
-// Step 4: Full orchestration — ALWAYS run agents in parallel for speed
+// Step 4: Full orchestration (used by old single-call path, kept for reference)
+// The new architecture calls conductorAnalyze + executeAgent separately.
 // ============================================
 
 export async function orchestrate(
@@ -319,34 +371,25 @@ export async function orchestrate(
     timestamp: new Date().toISOString(),
     agentId: "conductor",
     agentName: "Conductor",
-    message: "Analyzing your workflow and assembling the agent team...",
+    message: "Analyzing your workflow...",
     type: "thinking",
   });
 
   const conductorResult = await conductorAnalyze(description);
   const agents = buildAgents(conductorResult);
 
-  const agentSummary = agents
-    .map((a) => {
-      const tools = getToolsForAgent(a.type);
-      const toolNames = tools.map((t) => t.name).join(", ");
-      return `${a.name} [tools: ${toolNames || "none"}]`;
-    })
-    .join(", ");
-
   onLog({
     id: generateId(),
     timestamp: new Date().toISOString(),
     agentId: "conductor",
     agentName: "Conductor",
-    message: `Assembled ${agents.length} agents: ${agentSummary}`,
+    message: `Assembled ${agents.length} agents`,
     type: "success",
   });
 
   const results: Record<string, string> = {};
 
-  // ALWAYS run agents in parallel for speed (pass description as shared context)
-  // Even "sequential" workflows benefit from parallel execution with shared context
+  // Run agents in parallel
   const promises = agents.map(async (agent) => {
     onAgentUpdate(agent.id, { status: "running" });
     try {
@@ -354,7 +397,7 @@ export async function orchestrate(
       results[agent.id] = result;
       onAgentUpdate(agent.id, { status: "completed", result });
     } catch {
-      results[agent.id] = "Agent encountered an error but the workflow continues.";
+      results[agent.id] = "Agent encountered an error.";
       onAgentUpdate(agent.id, { status: "error", error: "Agent failed" });
     }
   });

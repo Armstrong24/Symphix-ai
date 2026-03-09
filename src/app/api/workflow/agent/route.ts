@@ -1,8 +1,8 @@
 // ============================================
 // Single Agent Execution API — POST /api/workflow/agent
-// Executes ONE agent with tool-calling. Each call is ~10-20s.
-// The client calls this in parallel for all agents after /execute returns.
-// This keeps each request well within Vercel's 60s timeout.
+// Executes ONE agent with tool-calling. Each call ~10-30s.
+// The client calls this for each agent after /execute returns.
+// 50s hard timeout to stay under Vercel's 60s limit.
 // ============================================
 
 import { NextRequest, NextResponse } from "next/server";
@@ -13,21 +13,31 @@ import type { Agent, LogEntry } from "@/types";
 export const maxDuration = 60;
 
 export async function POST(request: NextRequest) {
+  // Parse body first so we have agent info for error responses
+  let body: { workflowId?: string; runId?: string; agent?: Agent; description?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  }
+
+  const { workflowId, runId, agent, description } = body;
+
+  if (!workflowId || !runId || !agent || !description) {
+    return NextResponse.json(
+      { error: "workflowId, runId, agent, and description are required" },
+      { status: 400 }
+    );
+  }
+
   try {
     const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
 
     if (!user) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-    }
-
-    const { workflowId, runId, agent, description } = await request.json();
-
-    if (!workflowId || !runId || !agent || !description) {
-      return NextResponse.json(
-        { error: "workflowId, runId, agent, and description are required" },
-        { status: 400 }
-      );
     }
 
     // Collect logs during execution
@@ -36,45 +46,54 @@ export async function POST(request: NextRequest) {
       agentLogs.push(log);
     };
 
-    // Execute the single agent
-    const result = await executeAgent(
-      agent as Agent,
-      description,
-      [], // no previous results in parallel mode
-      onLog
-    );
+    // Execute with a 50s hard timeout (Vercel kills at 60s)
+    const agentPromise = executeAgent(agent as Agent, description, [], onLog);
 
-    // Update the workflow — mark this agent as completed in the agents array
-    const { data: workflow } = await supabase
-      .from("workflows")
-      .select("agents")
-      .eq("id", workflowId)
-      .single();
+    const timeoutPromise = new Promise<string>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error("Agent execution timed out (50s limit). Try a simpler prompt."));
+      }, 50000);
+    });
 
-    if (workflow?.agents && Array.isArray(workflow.agents)) {
-      const updatedAgents = (workflow.agents as Agent[]).map((a) =>
-        a.id === agent.id
-          ? { ...a, status: "completed" as const, result }
-          : a
-      );
-      await supabase
+    const result = await Promise.race([agentPromise, timeoutPromise]);
+
+    // Update the workflow agents array in DB
+    try {
+      const { data: workflow } = await supabase
         .from("workflows")
-        .update({ agents: updatedAgents, updated_at: new Date().toISOString() })
-        .eq("id", workflowId);
+        .select("agents")
+        .eq("id", workflowId)
+        .single();
+
+      if (workflow?.agents && Array.isArray(workflow.agents)) {
+        const updatedAgents = (workflow.agents as Agent[]).map((a) =>
+          a.id === agent.id ? { ...a, status: "completed" as const, result } : a
+        );
+        await supabase
+          .from("workflows")
+          .update({ agents: updatedAgents, updated_at: new Date().toISOString() })
+          .eq("id", workflowId);
+      }
+    } catch {
+      // Non-critical — the client has the result anyway
     }
 
-    // Append logs to the run record
-    const { data: runData } = await supabase
-      .from("workflow_runs")
-      .select("logs")
-      .eq("id", runId)
-      .single();
+    // Append logs to run record
+    try {
+      const { data: runData } = await supabase
+        .from("workflow_runs")
+        .select("logs")
+        .eq("id", runId)
+        .single();
 
-    const existingLogs = (runData?.logs as LogEntry[]) || [];
-    await supabase
-      .from("workflow_runs")
-      .update({ logs: [...existingLogs, ...agentLogs] })
-      .eq("id", runId);
+      const existingLogs = (runData?.logs as LogEntry[]) || [];
+      await supabase
+        .from("workflow_runs")
+        .update({ logs: [...existingLogs, ...agentLogs] })
+        .eq("id", runId);
+    } catch {
+      // Non-critical
+    }
 
     return NextResponse.json({
       success: true,
@@ -83,9 +102,14 @@ export async function POST(request: NextRequest) {
       logs: agentLogs,
     });
   } catch (error: any) {
-    console.error("Agent execution error:", error);
+    console.error(`Agent ${agent?.name || "unknown"} error:`, error?.message || error);
     return NextResponse.json(
-      { error: error.message || "Agent execution failed" },
+      {
+        success: false,
+        error: error.message || "Agent execution failed",
+        agentId: agent?.id,
+        logs: [],
+      },
       { status: 500 }
     );
   }

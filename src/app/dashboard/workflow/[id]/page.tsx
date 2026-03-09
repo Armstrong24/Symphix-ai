@@ -131,17 +131,16 @@ export default function WorkflowDetailPage() {
     try {
       return JSON.parse(text);
     } catch {
-      // If Vercel returns an HTML error page (502/504 timeout), extract a useful message
       if (text.includes("<!") || text.includes("<html")) {
-        throw new Error("Request timed out. Please try again with a simpler prompt.");
+        throw new Error("Server timed out. Try a simpler prompt.");
       }
-      throw new Error(`Unexpected response: ${text.slice(0, 100)}`);
+      throw new Error(`Server error: ${text.slice(0, 200)}`);
     }
   };
 
   // Execute workflow — split architecture to avoid Vercel 60s timeout
-  // Phase 1: Call /execute to get the agent plan (~3s)
-  // Phase 2: Call /agent for each agent in parallel (~10-20s each)
+  // Phase 1: /execute gets the agent plan (~3s)
+  // Phase 2: /agent for each agent, staggered by 1.5s to avoid Groq rate limits
   const handleRun = useCallback(async () => {
     if (!workflow) return;
     setIsRunning(true);
@@ -151,7 +150,7 @@ export default function WorkflowDetailPage() {
     setAgents([]);
 
     try {
-      // Phase 1: Conductor — get agent plan
+      // ── Phase 1: Conductor ──────────────────────────────────
       setProgress(5);
       const executeRes = await fetch("/api/workflow/execute", {
         method: "POST",
@@ -174,22 +173,22 @@ export default function WorkflowDetailPage() {
       setWorkflow((prev) => prev ? { ...prev, title: title || prev.title, status: "running" } : prev);
       setProgress(15);
 
-      // Add conductor log
       setLogs([{
         id: crypto.randomUUID(),
         timestamp: new Date().toISOString(),
         agentId: "conductor",
         agentName: "Conductor",
-        message: `Assembled ${runningAgents.length} agents. Executing in parallel...`,
+        message: `Assembled ${runningAgents.length} agent${runningAgents.length > 1 ? "s" : ""}. Starting execution...`,
         type: "success",
       }]);
 
-      // Phase 2: Execute each agent in parallel via /api/workflow/agent
+      // ── Phase 2: Execute agents with staggered starts ──────
+      // Stagger by 1.5s between each to avoid Groq rate limits
       const totalAgents = runningAgents.length;
       let completedCount = 0;
       const newResults: Record<string, string> = {};
 
-      const agentPromises = runningAgents.map(async (agent: Agent) => {
+      const executeOneAgent = async (agent: Agent) => {
         try {
           const agentRes = await fetch("/api/workflow/agent", {
             method: "POST",
@@ -208,7 +207,6 @@ export default function WorkflowDetailPage() {
             throw new Error(agentData.error || "Agent failed");
           }
 
-          // Update this agent to completed
           newResults[agent.id] = agentData.result;
           completedCount++;
 
@@ -219,15 +217,16 @@ export default function WorkflowDetailPage() {
           );
           setResults((prev) => ({ ...prev, [agent.id]: agentData.result }));
           setLogs((prev) => [...prev, ...(agentData.logs || [])]);
-
-          // Update progress: 15% (conductor) + 85% split across agents
-          const agentProgress = 15 + (completedCount / totalAgents) * 85;
-          setProgress(agentProgress);
+          setProgress(15 + (completedCount / totalAgents) * 85);
         } catch (agentErr: any) {
           completedCount++;
+          // Still show partial result even on error
+          const errMsg = agentErr.message || "Agent failed";
+          newResults[agent.id] = `Error: ${errMsg}`;
+
           setAgents((prev) =>
             prev.map((a) =>
-              a.id === agent.id ? { ...a, status: "error", error: agentErr.message } : a
+              a.id === agent.id ? { ...a, status: "error", error: errMsg } : a
             )
           );
           setLogs((prev) => [
@@ -237,42 +236,62 @@ export default function WorkflowDetailPage() {
               timestamp: new Date().toISOString(),
               agentId: agent.id,
               agentName: agent.name,
-              message: `Error: ${agentErr.message}`,
+              message: `Error: ${errMsg}`,
               type: "error" as const,
             },
           ]);
-          const agentProgress = 15 + (completedCount / totalAgents) * 85;
-          setProgress(agentProgress);
+          setProgress(15 + (completedCount / totalAgents) * 85);
         }
-      });
+      };
+
+      // Launch agents with staggered starts (1.5s apart) to avoid rate limits
+      // All still run concurrently — they just START at different times
+      const agentPromises = runningAgents.map((agent: Agent, index: number) =>
+        new Promise<void>((resolve) => {
+          setTimeout(async () => {
+            await executeOneAgent(agent);
+            resolve();
+          }, index * 1500); // 0s, 1.5s, 3s stagger
+        })
+      );
 
       await Promise.all(agentPromises);
 
-      // Phase 3: Finalize — update workflow status in DB
+      // ── Phase 3: Finalize ──────────────────────────────────
       const supabase = createClient();
+
+      // Determine final status: if any agent actually succeeded, it's completed
+      const hasAnySuccess = Object.values(newResults).some((r) => !r.startsWith("Error:"));
+      const finalStatus = hasAnySuccess ? "completed" : "failed";
+
       await supabase
         .from("workflows")
         .update({
-          status: "completed",
+          status: finalStatus,
           completed_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
         .eq("id", workflow.id);
 
-      // Update run record as completed
       await supabase
         .from("workflow_runs")
         .update({
-          status: "completed",
+          status: finalStatus,
           result: JSON.stringify(newResults),
           completed_at: new Date().toISOString(),
         })
         .eq("id", newRunId);
 
-      setWorkflow((prev) => prev ? { ...prev, status: "completed" } : prev);
+      setWorkflow((prev) => prev ? { ...prev, status: finalStatus } : prev);
       setProgress(100);
-      toast.success("Workflow completed!");
+
+      if (finalStatus === "completed") {
+        toast.success("Workflow completed!");
+      } else {
+        toast.error("Workflow finished with errors. Check agent results.");
+      }
     } catch (err: any) {
+      console.error("Workflow error:", err);
       toast.error(err.message || "Execution failed");
       setWorkflow((prev) => prev ? { ...prev, status: "failed" } : prev);
       setProgress(0);
