@@ -1,14 +1,15 @@
 "use client";
 
 // ============================================
-// Navbar — Symphix top navigation
-// Glassmorphism + animated logo
+// Navbar — Symphix landing page top navigation
+// Glassmorphism + animated logo + theme toggle
 // ============================================
 
 import Link from "next/link";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { Zap, Menu, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/shared/theme-toggle";
 import { useState } from "react";
 
 export function Navbar({ isLoggedIn = false }: { isLoggedIn?: boolean }) {
@@ -28,13 +29,14 @@ export function Navbar({ isLoggedIn = false }: { isLoggedIn?: boolean }) {
             whileHover={{ rotate: 15, scale: 1.1 }}
             transition={{ type: "spring", stiffness: 300 }}
           >
-            <Zap className="h-7 w-7 text-neon-cyan" />
+            <Zap className="h-7 w-7 text-primary" />
           </motion.div>
           <span className="text-xl font-bold text-gradient">Symphix</span>
         </Link>
 
         {/* Desktop nav */}
-        <div className="hidden md:flex items-center gap-6">
+        <div className="hidden md:flex items-center gap-4">
+          <ThemeToggle />
           {isLoggedIn ? (
             <>
               <Link
@@ -49,11 +51,6 @@ export function Navbar({ isLoggedIn = false }: { isLoggedIn?: boolean }) {
               >
                 History
               </Link>
-              <form action="/auth/signout" method="post">
-                <Button variant="ghost" size="sm">
-                  Sign Out
-                </Button>
-              </form>
             </>
           ) : (
             <>
@@ -66,7 +63,7 @@ export function Navbar({ isLoggedIn = false }: { isLoggedIn?: boolean }) {
                 <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
                   <Button
                     size="sm"
-                    className="bg-neon-cyan text-black font-semibold hover:bg-neon-cyan/80 glow-cyan"
+                    className="bg-primary text-primary-foreground font-semibold hover:bg-primary/80 glow-cyan"
                   >
                     Get Started
                   </Button>
@@ -77,43 +74,48 @@ export function Navbar({ isLoggedIn = false }: { isLoggedIn?: boolean }) {
         </div>
 
         {/* Mobile hamburger */}
-        <button
-          className="md:hidden text-foreground"
-          onClick={() => setMobileOpen(!mobileOpen)}
-        >
-          {mobileOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
-        </button>
+        <div className="flex md:hidden items-center gap-2">
+          <ThemeToggle />
+          <button
+            className="text-foreground"
+            onClick={() => setMobileOpen(!mobileOpen)}
+          >
+            {mobileOpen ? <X className="h-6 w-6" /> : <Menu className="h-6 w-6" />}
+          </button>
+        </div>
       </div>
 
       {/* Mobile menu */}
-      {mobileOpen && (
-        <motion.div
-          initial={{ opacity: 0, height: 0 }}
-          animate={{ opacity: 1, height: "auto" }}
-          exit={{ opacity: 0, height: 0 }}
-          className="md:hidden glass-strong border-t border-white/5 px-4 py-4 space-y-3"
-        >
-          {isLoggedIn ? (
-            <>
-              <Link href="/dashboard" className="block text-sm text-muted-foreground hover:text-foreground">
-                Dashboard
-              </Link>
-              <Link href="/dashboard/history" className="block text-sm text-muted-foreground hover:text-foreground">
-                History
-              </Link>
-            </>
-          ) : (
-            <>
-              <Link href="/auth/login" className="block text-sm text-muted-foreground hover:text-foreground">
-                Sign In
-              </Link>
-              <Link href="/auth/signup" className="block text-sm font-semibold text-neon-cyan">
-                Get Started
-              </Link>
-            </>
-          )}
-        </motion.div>
-      )}
+      <AnimatePresence>
+        {mobileOpen && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="md:hidden glass-strong border-t border-border px-4 py-4 space-y-3"
+          >
+            {isLoggedIn ? (
+              <>
+                <Link href="/dashboard" className="block text-sm text-muted-foreground hover:text-foreground" onClick={() => setMobileOpen(false)}>
+                  Dashboard
+                </Link>
+                <Link href="/dashboard/history" className="block text-sm text-muted-foreground hover:text-foreground" onClick={() => setMobileOpen(false)}>
+                  History
+                </Link>
+              </>
+            ) : (
+              <>
+                <Link href="/auth/login" className="block text-sm text-muted-foreground hover:text-foreground" onClick={() => setMobileOpen(false)}>
+                  Sign In
+                </Link>
+                <Link href="/auth/signup" className="block text-sm font-semibold text-primary" onClick={() => setMobileOpen(false)}>
+                  Get Started
+                </Link>
+              </>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </motion.nav>
   );
 }

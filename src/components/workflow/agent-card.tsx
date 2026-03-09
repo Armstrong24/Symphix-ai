@@ -1,8 +1,8 @@
 "use client";
 
 // ============================================
-// Agent Card — Individual agent display with animations
-// Shows status, thinking animation, and results
+// Agent Card — Individual agent display
+// Pulse while thinking, status badges, expandable results
 // ============================================
 
 import { motion, AnimatePresence } from "framer-motion";
@@ -43,10 +43,10 @@ export function AgentCard({ agent, result, isExpanded = false }: AgentCardProps)
   const Icon = iconMap[agent.icon] || Cpu;
 
   const statusStyles: Record<string, string> = {
-    idle: "border-white/5",
+    idle: "border-border",
     thinking: "border-neon-purple/30 glow-purple",
-    running: "border-neon-cyan/30 glow-cyan",
-    completed: "border-green-500/30",
+    running: "border-primary/30 glow-cyan",
+    completed: "border-neon-green/30",
     error: "border-red-500/30",
   };
 
@@ -81,7 +81,7 @@ export function AgentCard({ agent, result, isExpanded = false }: AgentCardProps)
         {/* Status badge */}
         <div>
           {agent.status === "running" && (
-            <Badge variant="outline" className="text-neon-cyan border-neon-cyan/20 text-xs">
+            <Badge variant="outline" className="text-primary border-primary/20 text-xs">
               <Loader2 className="mr-1 h-3 w-3 animate-spin" />
               Running
             </Badge>
@@ -92,7 +92,7 @@ export function AgentCard({ agent, result, isExpanded = false }: AgentCardProps)
             </Badge>
           )}
           {agent.status === "completed" && (
-            <Badge variant="outline" className="text-green-400 border-green-400/20 text-xs">
+            <Badge variant="outline" className="text-neon-green border-neon-green/20 text-xs">
               <CheckCircle2 className="mr-1 h-3 w-3" />
               Done
             </Badge>
@@ -116,11 +116,11 @@ export function AgentCard({ agent, result, isExpanded = false }: AgentCardProps)
             initial={{ opacity: 0, height: 0 }}
             animate={{ opacity: 1, height: "auto" }}
             exit={{ opacity: 0, height: 0 }}
-            className="mt-3 pt-3 border-t border-white/5"
+            className="mt-3 pt-3 border-t border-border"
           >
             <p className="text-xs font-medium text-muted-foreground mb-1">Result:</p>
             <div className="text-xs text-foreground/80 whitespace-pre-wrap max-h-48 overflow-y-auto font-mono leading-relaxed">
-              {result}
+              {result.slice(0, 500)}{result.length > 500 ? "..." : ""}
             </div>
           </motion.div>
         )}

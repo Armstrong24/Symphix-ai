@@ -14,7 +14,7 @@ export default function LandingPage() {
       <FeaturesSection />
 
       {/* Footer */}
-      <footer className="border-t border-white/5 py-8 text-center text-sm text-muted-foreground">
+      <footer className="border-t border-border py-8 text-center text-sm text-muted-foreground">
         <p>&copy; {new Date().getFullYear()} Symphix. One prompt. Perfect harmony.</p>
       </footer>
     </main>

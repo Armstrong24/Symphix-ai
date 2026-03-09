@@ -1,11 +1,13 @@
 // ============================================
 // Root Layout — The stage for our AI symphony
+// Wraps everything with theme provider + toasts
 // ============================================
 
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { ThemeProvider } from "@/components/shared/theme-provider";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -31,25 +33,21 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="dark">
+    <html lang="en" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} min-h-screen bg-background font-sans antialiased`}
       >
-        <TooltipProvider>
-          {children}
-        </TooltipProvider>
-        <Toaster
-          theme="dark"
-          position="bottom-right"
-          toastOptions={{
-            style: {
-              background: "rgba(15, 23, 42, 0.9)",
-              border: "1px solid rgba(255, 255, 255, 0.08)",
-              color: "#f1f5f9",
-              backdropFilter: "blur(16px)",
-            },
-          }}
-        />
+        <ThemeProvider>
+          <TooltipProvider>
+            {children}
+          </TooltipProvider>
+          <Toaster
+            position="bottom-right"
+            toastOptions={{
+              className: "glass-strong",
+            }}
+          />
+        </ThemeProvider>
       </body>
     </html>
   );

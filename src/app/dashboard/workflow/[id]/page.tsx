@@ -2,7 +2,7 @@
 
 // ============================================
 // Workflow Detail Page — The execution command center
-// Shows agents, runs them, displays live logs
+// Agent cards with pulse, live logs, progress, markdown output
 // ============================================
 
 import { useEffect, useState, useCallback } from "react";
@@ -14,7 +14,9 @@ import { LiveLogs } from "@/components/workflow/live-logs";
 import { FeedbackButtons } from "@/components/workflow/feedback-buttons";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
+import ReactMarkdown from "react-markdown";
 import {
   Play,
   Loader2,
@@ -22,10 +24,26 @@ import {
   XCircle,
   Clock,
   ArrowLeft,
+  Copy,
+  Download,
+  RefreshCw,
 } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
 import type { Agent, LogEntry, Workflow } from "@/types";
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: { staggerChildren: 0.08 },
+  },
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 20 },
+  visible: { opacity: 1, y: 0, transition: { duration: 0.5, ease: "easeOut" as const } },
+};
 
 export default function WorkflowDetailPage() {
   const params = useParams();
@@ -38,8 +56,9 @@ export default function WorkflowDetailPage() {
   const [runId, setRunId] = useState<string | null>(null);
   const [results, setResults] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
+  const [progress, setProgress] = useState(0);
 
-  // Fetch workflow
+  // Fetch workflow on mount
   useEffect(() => {
     async function fetchWorkflow() {
       const supabase = createClient();
@@ -53,6 +72,37 @@ export default function WorkflowDetailPage() {
         setWorkflow(data as Workflow);
         if (data.agents && Array.isArray(data.agents) && data.agents.length > 0) {
           setAgents(data.agents as Agent[]);
+          // If completed, build results from stored agents
+          if (data.status === "completed") {
+            const storedResults: Record<string, string> = {};
+            (data.agents as Agent[]).forEach((a) => {
+              if (a.result) storedResults[a.id] = a.result;
+            });
+            setResults(storedResults);
+          }
+        }
+
+        // Also fetch the latest run for logs
+        const { data: runData } = await supabase
+          .from("workflow_runs")
+          .select("*")
+          .eq("workflow_id", workflowId)
+          .order("started_at", { ascending: false })
+          .limit(1)
+          .single();
+
+        if (runData) {
+          setRunId(runData.id);
+          if (runData.logs && Array.isArray(runData.logs)) {
+            setLogs(runData.logs as LogEntry[]);
+          }
+          // If we have stored results
+          if (runData.result) {
+            try {
+              const parsed = JSON.parse(runData.result);
+              setResults((prev) => ({ ...prev, ...parsed }));
+            } catch {}
+          }
         }
       }
       setLoading(false);
@@ -60,12 +110,25 @@ export default function WorkflowDetailPage() {
     fetchWorkflow();
   }, [workflowId]);
 
+  // Simulate progress during execution
+  useEffect(() => {
+    if (!isRunning) return;
+    const interval = setInterval(() => {
+      setProgress((prev) => {
+        if (prev >= 90) return prev;
+        return prev + Math.random() * 8;
+      });
+    }, 800);
+    return () => clearInterval(interval);
+  }, [isRunning]);
+
   // Execute workflow
   const handleRun = useCallback(async () => {
     if (!workflow) return;
     setIsRunning(true);
     setLogs([]);
     setResults({});
+    setProgress(0);
 
     try {
       const response = await fetch("/api/workflow/execute", {
@@ -86,23 +149,51 @@ export default function WorkflowDetailPage() {
       setLogs(data.logs || []);
       setResults(data.results || {});
       setWorkflow((prev) => prev ? { ...prev, status: "completed" } : prev);
+      setProgress(100);
       toast.success("Workflow completed!");
     } catch (err: any) {
       toast.error(err.message || "Execution failed");
       setWorkflow((prev) => prev ? { ...prev, status: "failed" } : prev);
+      setProgress(0);
     } finally {
       setIsRunning(false);
     }
   }, [workflow]);
 
+  // Copy all results to clipboard
+  const handleCopyAll = () => {
+    const allText = Object.values(results).join("\n\n---\n\n");
+    navigator.clipboard.writeText(allText);
+    toast.success("Copied to clipboard!");
+  };
+
+  // Export as markdown
+  const handleExportMarkdown = () => {
+    const allText = Object.entries(results)
+      .map(([id, result]) => {
+        const agent = agents.find((a) => a.id === id);
+        return `## ${agent?.name || "Agent"}\n\n${result}`;
+      })
+      .join("\n\n---\n\n");
+
+    const blob = new Blob([allText], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${workflow?.title || "workflow"}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success("Exported as Markdown!");
+  };
+
   if (loading) {
     return (
       <div className="max-w-5xl mx-auto space-y-6">
-        <Skeleton className="h-8 w-64 bg-white/5" />
-        <Skeleton className="h-4 w-96 bg-white/5" />
+        <Skeleton className="h-8 w-64 bg-muted" />
+        <Skeleton className="h-4 w-96 bg-muted" />
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {[1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-40 bg-white/5 rounded-xl" />
+            <Skeleton key={i} className="h-40 bg-muted rounded-xl" />
           ))}
         </div>
       </div>
@@ -124,29 +215,31 @@ export default function WorkflowDetailPage() {
 
   const statusConfig: Record<string, { icon: any; color: string; label: string }> = {
     draft: { icon: Clock, color: "text-muted-foreground", label: "Draft" },
-    running: { icon: Loader2, color: "text-neon-cyan", label: "Running" },
-    completed: { icon: CheckCircle2, color: "text-green-400", label: "Completed" },
+    running: { icon: Loader2, color: "text-primary", label: "Running" },
+    completed: { icon: CheckCircle2, color: "text-neon-green", label: "Completed" },
     failed: { icon: XCircle, color: "text-red-400", label: "Failed" },
   };
   const status = statusConfig[workflow.status] || statusConfig.draft;
+  const hasResults = Object.keys(results).length > 0;
 
   return (
     <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
+      variants={containerVariants}
+      initial="hidden"
+      animate="visible"
       className="max-w-5xl mx-auto"
     >
       {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
+      <motion.div variants={itemVariants} className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
         <div>
           <div className="flex items-center gap-3 mb-2">
             <Link href="/dashboard">
-              <Button variant="ghost" size="icon-sm">
-                <ArrowLeft className="h-4 w-4" />
-              </Button>
+              <motion.div whileHover={{ x: -3 }} className="h-8 w-8 rounded-lg flex items-center justify-center hover:bg-muted/50 transition-colors">
+                <ArrowLeft className="h-4 w-4 text-muted-foreground" />
+              </motion.div>
             </Link>
             <h1 className="text-2xl font-bold">{workflow.title}</h1>
-            <Badge variant="outline" className={`${status.color} border-current/20`}>
+            <Badge variant="outline" className={`${status.color}`}>
               <status.icon className={`mr-1 h-3 w-3 ${workflow.status === "running" ? "animate-spin" : ""}`} />
               {status.label}
             </Badge>
@@ -154,29 +247,69 @@ export default function WorkflowDetailPage() {
           <p className="text-muted-foreground text-sm ml-11">{workflow.description}</p>
         </div>
 
-        <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
-          <Button
-            onClick={handleRun}
-            disabled={isRunning}
-            className="bg-neon-cyan text-black font-semibold hover:bg-neon-cyan/80 glow-cyan"
+        <div className="flex items-center gap-2">
+          {hasResults && (
+            <>
+              <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                <Button variant="outline" size="sm" onClick={handleCopyAll} className="gap-2">
+                  <Copy className="h-3.5 w-3.5" />
+                  Copy
+                </Button>
+              </motion.div>
+              <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+                <Button variant="outline" size="sm" onClick={handleExportMarkdown} className="gap-2">
+                  <Download className="h-3.5 w-3.5" />
+                  Export
+                </Button>
+              </motion.div>
+            </>
+          )}
+          <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
+            <Button
+              onClick={handleRun}
+              disabled={isRunning}
+              className="bg-primary text-primary-foreground font-semibold hover:bg-primary/80 glow-cyan gap-2"
+            >
+              {isRunning ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" /> Running...
+                </>
+              ) : hasResults ? (
+                <>
+                  <RefreshCw className="h-4 w-4" /> Re-run
+                </>
+              ) : (
+                <>
+                  <Play className="h-4 w-4" /> Run Workflow
+                </>
+              )}
+            </Button>
+          </motion.div>
+        </div>
+      </motion.div>
+
+      {/* Progress bar during execution */}
+      <AnimatePresence>
+        {isRunning && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mb-6"
           >
-            {isRunning ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Running...
-              </>
-            ) : (
-              <>
-                <Play className="mr-2 h-4 w-4" /> Run Workflow
-              </>
-            )}
-          </Button>
-        </motion.div>
-      </div>
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm text-muted-foreground">Orchestrating agents...</span>
+              <span className="text-sm font-medium">{Math.round(progress)}%</span>
+            </div>
+            <Progress value={progress} className="h-2" />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Agent cards */}
-      <div className="mb-8">
+      <motion.div variants={itemVariants} className="mb-8">
         <h2 className="text-lg font-semibold mb-4">
-          {agents.length > 0 ? "Agent Team" : "Agents will appear after running"}
+          {agents.length > 0 ? `Agent Team (${agents.length})` : "Agents will appear after running"}
         </h2>
         <AnimatePresence mode="popLayout">
           <motion.div
@@ -199,19 +332,51 @@ export default function WorkflowDetailPage() {
             ))}
           </motion.div>
         </AnimatePresence>
-      </div>
+      </motion.div>
+
+      {/* Rendered blog/content output */}
+      {hasResults && workflow.status === "completed" && (
+        <motion.div variants={itemVariants} className="mb-8">
+          <h2 className="text-lg font-semibold mb-4">Output</h2>
+          <div className="glass rounded-2xl p-6 sm:p-8">
+            <div className="prose-symphix">
+              {Object.entries(results).map(([agentId, result]) => {
+                const agent = agents.find((a) => a.id === agentId);
+                return (
+                  <div key={agentId} className="mb-6 last:mb-0">
+                    {agents.length > 1 && (
+                      <div className="flex items-center gap-2 mb-3 pb-2 border-b border-border">
+                        <div
+                          className="h-6 w-6 rounded-lg flex items-center justify-center"
+                          style={{ backgroundColor: `${agent?.color || "#00f0ff"}15` }}
+                        >
+                          <CheckCircle2 className="h-3 w-3" style={{ color: agent?.color || "#00f0ff" }} />
+                        </div>
+                        <span className="text-sm font-medium">{agent?.name || "Agent"}</span>
+                      </div>
+                    )}
+                    <ReactMarkdown>{result}</ReactMarkdown>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       {/* Live logs */}
       {logs.length > 0 && (
-        <div className="mb-8">
+        <motion.div variants={itemVariants} className="mb-8">
           <h2 className="text-lg font-semibold mb-4">Execution Log</h2>
           <LiveLogs logs={logs} />
-        </div>
+        </motion.div>
       )}
 
       {/* Feedback */}
       {workflow.status === "completed" && runId && (
-        <FeedbackButtons runId={runId} />
+        <motion.div variants={itemVariants}>
+          <FeedbackButtons runId={runId} />
+        </motion.div>
       )}
     </motion.div>
   );

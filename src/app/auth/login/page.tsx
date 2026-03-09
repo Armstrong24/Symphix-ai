@@ -73,7 +73,7 @@ export default function LoginPage() {
           {/* Google OAuth */}
           <Button
             variant="outline"
-            className="w-full h-11 border-white/10 mb-4"
+            className="w-full h-11 border-border mb-4"
             onClick={handleGoogleLogin}
           >
             <svg className="mr-2 h-4 w-4" viewBox="0 0 24 24">
@@ -100,10 +100,10 @@ export default function LoginPage() {
           {/* Divider */}
           <div className="relative my-6">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-white/10" />
+              <div className="w-full border-t border-border" />
             </div>
             <div className="relative flex justify-center text-xs">
-              <span className="bg-[#0f172a] px-3 text-muted-foreground">or</span>
+              <span className="bg-background px-3 text-muted-foreground">or</span>
             </div>
           </div>
 
@@ -115,7 +115,7 @@ export default function LoginPage() {
                 placeholder="Email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                className="h-11 bg-white/5 border-white/10"
+                className="h-11 bg-muted/50 border-border"
                 required
               />
             </div>
@@ -125,7 +125,7 @@ export default function LoginPage() {
                 placeholder="Password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="h-11 bg-white/5 border-white/10"
+                className="h-11 bg-muted/50 border-border"
                 required
               />
             </div>

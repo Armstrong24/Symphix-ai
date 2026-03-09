@@ -77,7 +77,7 @@ export default function SignupPage() {
 
           <Button
             variant="outline"
-            className="w-full h-11 border-white/10 mb-4"
+            className="w-full h-11 border-border mb-4"
             onClick={handleGoogleSignup}
           >
             <svg className="mr-2 h-4 w-4" viewBox="0 0 24 24">
@@ -91,10 +91,10 @@ export default function SignupPage() {
 
           <div className="relative my-6">
             <div className="absolute inset-0 flex items-center">
-              <div className="w-full border-t border-white/10" />
+              <div className="w-full border-t border-border" />
             </div>
             <div className="relative flex justify-center text-xs">
-              <span className="bg-[#0f172a] px-3 text-muted-foreground">or</span>
+              <span className="bg-background px-3 text-muted-foreground">or</span>
             </div>
           </div>
 
@@ -104,7 +104,7 @@ export default function SignupPage() {
               placeholder="Full Name"
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
-              className="h-11 bg-white/5 border-white/10"
+              className="h-11 bg-muted/50 border-border"
               required
             />
             <Input
@@ -112,7 +112,7 @@ export default function SignupPage() {
               placeholder="Email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="h-11 bg-white/5 border-white/10"
+              className="h-11 bg-muted/50 border-border"
               required
             />
             <Input
@@ -120,7 +120,7 @@ export default function SignupPage() {
               placeholder="Password (min 6 characters)"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="h-11 bg-white/5 border-white/10"
+              className="h-11 bg-muted/50 border-border"
               minLength={6}
               required
             />

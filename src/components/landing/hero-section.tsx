@@ -141,7 +141,7 @@ export function HeroSection() {
             <Button
               variant="outline"
               size="lg"
-              className="border-white/10 h-12 text-base"
+              className="border-border h-12 text-base"
             >
               Sign In
             </Button>

@@ -2,7 +2,7 @@
 
 // ============================================
 // Feedback Buttons — Thumbs up/down on workflow runs
-// Stores to Supabase to improve future runs
+// Stores to Supabase for quality tracking
 // ============================================
 
 import { useState } from "react";
@@ -25,7 +25,7 @@ export function FeedbackButtons({ runId }: { runId: string }) {
       });
       if (!res.ok) throw new Error("Failed to submit");
       setSubmitted(feedback);
-      toast.success(feedback === "up" ? "Glad it helped!" : "Thanks for the feedback — we'll improve!");
+      toast.success(feedback === "up" ? "Glad it helped!" : "Thanks for the feedback!");
     } catch {
       toast.error("Failed to submit feedback");
     } finally {
@@ -47,7 +47,7 @@ export function FeedbackButtons({ runId }: { runId: string }) {
             size="lg"
             disabled={loading || submitted !== null}
             onClick={() => handleFeedback("up")}
-            className={`border-white/10 ${submitted === "up" ? "bg-green-500/20 text-green-400 border-green-500/30" : ""}`}
+            className={submitted === "up" ? "bg-neon-green/20 text-neon-green border-neon-green/30" : ""}
           >
             <ThumbsUp className="mr-2 h-5 w-5" />
             Helpful
@@ -59,7 +59,7 @@ export function FeedbackButtons({ runId }: { runId: string }) {
             size="lg"
             disabled={loading || submitted !== null}
             onClick={() => handleFeedback("down")}
-            className={`border-white/10 ${submitted === "down" ? "bg-red-500/20 text-red-400 border-red-500/30" : ""}`}
+            className={submitted === "down" ? "bg-red-500/20 text-red-400 border-red-500/30" : ""}
           >
             <ThumbsDown className="mr-2 h-5 w-5" />
             Needs Work
