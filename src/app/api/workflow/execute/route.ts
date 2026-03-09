@@ -8,6 +8,9 @@ import { createClient } from "@/lib/supabase/server";
 import { orchestrate } from "@/lib/orchestra";
 import type { LogEntry, Agent } from "@/types";
 
+// Vercel serverless function config — max timeout for Hobby plan
+export const maxDuration = 60;
+
 export async function POST(request: NextRequest) {
   try {
     const supabase = await createClient();

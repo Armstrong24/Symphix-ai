@@ -2,6 +2,7 @@
 // Symphix Orchestra — LangGraph.js Agent Orchestration
 // The conductor that turns one prompt into a team of agents
 // Now with REAL tool-calling: web search, email, scheduling, etc.
+// Optimized for Vercel 60s timeout: fast models, reduced tokens, parallel execution
 // ============================================
 
 import { ChatGroq } from "@langchain/groq";
@@ -11,13 +12,22 @@ import type { AgentType, Agent, LogEntry } from "@/types";
 import { AGENT_CONFIG } from "@/types";
 import { getToolsForAgent } from "@/lib/tools";
 
-// Initialize Groq LLM
-function getLLM() {
+// Initialize Groq LLM — use fast 8B model for conductor, 70B for agents
+function getConductorLLM() {
+  return new ChatGroq({
+    apiKey: process.env.GROQ_API_KEY,
+    model: "llama-3.1-8b-instant",
+    temperature: 0.1,
+    maxTokens: 1024,
+  });
+}
+
+function getAgentLLM() {
   return new ChatGroq({
     apiKey: process.env.GROQ_API_KEY,
     model: "llama-3.3-70b-versatile",
     temperature: 0.3,
-    maxTokens: 4096,
+    maxTokens: 2048,
   });
 }
 
@@ -40,27 +50,20 @@ interface ConductorResult {
 }
 
 export async function conductorAnalyze(description: string): Promise<ConductorResult> {
-  const llm = getLLM();
+  const llm = getConductorLLM();
 
-  const systemPrompt = `You are the Symphix Conductor — an AI orchestrator that breaks down user workflow descriptions into specialized sub-agents.
+  const systemPrompt = `You are the Symphix Conductor. Break down user requests into specialized AI agents.
 
-Available agent types:
-- email: Email drafting, replies, inbox management. Has tools: send_email, draft_email
-- research: Web search, data gathering, information synthesis. Has tools: web_search, web_extract
-- scheduler: Calendar management, meeting scheduling, reminders. Has tools: create_calendar_event, suggest_meeting_times
-- social: Social media content creation and posting. Has tools: create_social_post, create_content_plan
-- writer: Content writing, blog posts, reports, copywriting. Has tools: write_content, rewrite_content
-- analyst: Data analysis, trends, insights, number crunching. Has tools: calculate, analyze_data, compare
+Available agents: email, research, scheduler, social, writer, analyst
 
-Analyze the user's workflow description and output a JSON object with:
-1. "agents": array of { "type": agent_type, "task": specific_task_description }
-2. "execution_order": "parallel" if agents can work independently, "sequential" if they depend on each other, "mixed" if some parallel some sequential
-3. "title": a short 3-6 word title for this workflow
+Output JSON:
+{"agents":[{"type":"agent_type","task":"brief_task"}],"execution_order":"parallel"|"sequential","title":"3-6 word title"}
 
-Choose agents that BEST match the user's needs. Deploy multiple agents when the task spans multiple domains.
-If the task involves research followed by writing, use sequential order so the writer gets the research results.
-
-ONLY output valid JSON. No markdown, no explanation.`;
+Rules:
+- Use 1-3 agents max (fewer = faster)
+- Prefer "parallel" unless agents truly depend on each other
+- Keep task descriptions under 20 words
+- ONLY output valid JSON, nothing else`;
 
   const response = await llm.invoke([
     new SystemMessage(systemPrompt),
@@ -69,12 +72,17 @@ ONLY output valid JSON. No markdown, no explanation.`;
 
   try {
     const content = typeof response.content === "string" ? response.content : "";
-    // Extract JSON from response (handle potential markdown wrapping)
     const jsonMatch = content.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error("No JSON found in conductor response");
-    return JSON.parse(jsonMatch[0]);
+    const result = JSON.parse(jsonMatch[0]);
+
+    // Cap agents at 3 to stay within timeout
+    if (result.agents && result.agents.length > 3) {
+      result.agents = result.agents.slice(0, 3);
+    }
+
+    return result;
   } catch (err) {
-    // Fallback: create a sensible default
     return {
       agents: [
         { type: "research", task: "Research and gather relevant information" },
@@ -109,6 +117,7 @@ export function buildAgents(conductorResult: ConductorResult): Agent[] {
 // ============================================
 // Step 3: Execute individual agent WITH tool-calling
 // Each agent binds its specific tools and runs an agentic loop
+// Optimized: max 3 tool iterations, concise prompts
 // ============================================
 
 const agentSystemPrompts: Record<string, string> = {
@@ -185,7 +194,7 @@ export async function executeAgent(
   previousResults: string[],
   onLog: (log: LogEntry) => void
 ): Promise<string> {
-  const llm = getLLM();
+  const llm = getAgentLLM();
   const tools = getToolsForAgent(agent.type);
 
   const makeLog = (message: string, type: LogEntry["type"] = "info"): LogEntry => ({
@@ -197,33 +206,31 @@ export async function executeAgent(
     type,
   });
 
-  // Log: Agent starting
   onLog(makeLog(`Starting task: ${agent.description}`, "info"));
 
   const systemPrompt = agentSystemPrompts[agent.type] || agentSystemPrompts.custom;
 
+  // Only pass a brief summary of previous results (not full text) to save tokens
   const contextMessage =
     previousResults.length > 0
-      ? `\n\nPrevious agent results for context:\n${previousResults.join("\n---\n")}`
+      ? `\n\nContext from previous agents (summary):\n${previousResults.map((r) => r.slice(0, 500)).join("\n---\n")}`
       : "";
 
   onLog(makeLog("Analyzing task requirements...", "thinking"));
 
   try {
-    // Bind tools to the LLM
     const llmWithTools = tools.length > 0 ? llm.bindTools(tools) : llm;
 
-    // Build initial messages
     const messages: BaseMessage[] = [
       new SystemMessage(systemPrompt),
       new HumanMessage(
-        `Overall workflow: ${workflowDescription}\n\nYour specific task: ${agent.description}${contextMessage}\n\nComplete this task now. Use your tools when appropriate. Be specific and actionable.`
+        `Workflow: ${workflowDescription}\n\nYour task: ${agent.description}${contextMessage}\n\nComplete this task now. Use tools when needed. Be concise but thorough.`
       ),
     ];
 
-    // Agentic loop — keep running until the LLM stops calling tools (max 8 iterations)
+    // Agentic loop — max 3 iterations (down from 8) to stay within timeout
     let iterations = 0;
-    const maxIterations = 8;
+    const maxIterations = 3;
     let finalResponse = "";
 
     while (iterations < maxIterations) {
@@ -232,11 +239,9 @@ export async function executeAgent(
       const response = await llmWithTools.invoke(messages);
       messages.push(response);
 
-      // Check if there are tool calls
       const toolCalls = response.tool_calls;
 
       if (!toolCalls || toolCalls.length === 0) {
-        // No more tool calls — we have the final response
         finalResponse = typeof response.content === "string" ? response.content : "";
         break;
       }
@@ -284,16 +289,14 @@ export async function executeAgent(
     }
 
     if (!finalResponse) {
-      // If we hit max iterations, get a summary
       messages.push(
-        new HumanMessage("Please provide your final summary and results now.")
+        new HumanMessage("Provide your final summary now. Be concise.")
       );
       const summaryResponse = await llm.invoke(messages);
       finalResponse = typeof summaryResponse.content === "string" ? summaryResponse.content : "Task completed.";
     }
 
     onLog(makeLog("Task completed successfully!", "success"));
-
     return finalResponse;
   } catch (error: any) {
     const errorMsg = error.message || "Unknown error occurred";
@@ -303,7 +306,7 @@ export async function executeAgent(
 }
 
 // ============================================
-// Step 4: Full orchestration — runs all agents
+// Step 4: Full orchestration — ALWAYS run agents in parallel for speed
 // ============================================
 
 export async function orchestrate(
@@ -311,7 +314,6 @@ export async function orchestrate(
   onLog: (log: LogEntry) => void,
   onAgentUpdate: (agentId: string, updates: Partial<Agent>) => void
 ): Promise<{ agents: Agent[]; results: Record<string, string>; title: string }> {
-  // Step 1: Conductor analyzes
   onLog({
     id: generateId(),
     timestamp: new Date().toISOString(),
@@ -324,7 +326,6 @@ export async function orchestrate(
   const conductorResult = await conductorAnalyze(description);
   const agents = buildAgents(conductorResult);
 
-  // Log which tools each agent has
   const agentSummary = agents
     .map((a) => {
       const tools = getToolsForAgent(a.type);
@@ -342,37 +343,22 @@ export async function orchestrate(
     type: "success",
   });
 
-  // Step 2: Execute agents
   const results: Record<string, string> = {};
-  const previousResults: string[] = [];
 
-  if (conductorResult.execution_order === "parallel") {
-    // Run all agents in parallel
-    const promises = agents.map(async (agent) => {
-      onAgentUpdate(agent.id, { status: "running" });
-      try {
-        const result = await executeAgent(agent, description, [], onLog);
-        results[agent.id] = result;
-        onAgentUpdate(agent.id, { status: "completed", result });
-      } catch {
-        onAgentUpdate(agent.id, { status: "error", error: "Agent failed" });
-      }
-    });
-    await Promise.all(promises);
-  } else {
-    // Run agents sequentially (or mixed — sequential for simplicity)
-    for (const agent of agents) {
-      onAgentUpdate(agent.id, { status: "running" });
-      try {
-        const result = await executeAgent(agent, description, previousResults, onLog);
-        results[agent.id] = result;
-        previousResults.push(`[${agent.name}]: ${result}`);
-        onAgentUpdate(agent.id, { status: "completed", result });
-      } catch {
-        onAgentUpdate(agent.id, { status: "error", error: "Agent failed" });
-      }
+  // ALWAYS run agents in parallel for speed (pass description as shared context)
+  // Even "sequential" workflows benefit from parallel execution with shared context
+  const promises = agents.map(async (agent) => {
+    onAgentUpdate(agent.id, { status: "running" });
+    try {
+      const result = await executeAgent(agent, description, [], onLog);
+      results[agent.id] = result;
+      onAgentUpdate(agent.id, { status: "completed", result });
+    } catch {
+      results[agent.id] = "Agent encountered an error but the workflow continues.";
+      onAgentUpdate(agent.id, { status: "error", error: "Agent failed" });
     }
-  }
+  });
+  await Promise.all(promises);
 
   return { agents, results, title: conductorResult.title };
 }
