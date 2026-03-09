@@ -1,5 +1,5 @@
 // ============================================
-// Workflow CRUD API — GET/PATCH /api/workflow
+// Workflow CRUD API — GET/PATCH/DELETE /api/workflow
 // ============================================
 
 import { NextRequest, NextResponse } from "next/server";
@@ -43,6 +43,40 @@ export async function PATCH(request: NextRequest) {
     .from("workflow_runs")
     .update({ feedback })
     .eq("id", runId)
+    .eq("user_id", user.id);
+
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 });
+  return NextResponse.json({ success: true });
+}
+
+// DELETE — Delete a workflow (cascade deletes its runs)
+export async function DELETE(request: NextRequest) {
+  const supabase = await createClient();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+
+  const workflowId = request.nextUrl.searchParams.get("id");
+  if (!workflowId) {
+    return NextResponse.json({ error: "id required" }, { status: 400 });
+  }
+
+  // Verify ownership first
+  const { data: workflow } = await supabase
+    .from("workflows")
+    .select("id")
+    .eq("id", workflowId)
+    .eq("user_id", user.id)
+    .single();
+
+  if (!workflow) {
+    return NextResponse.json({ error: "Workflow not found" }, { status: 404 });
+  }
+
+  // Delete workflow (cascade will delete workflow_runs)
+  const { error } = await supabase
+    .from("workflows")
+    .delete()
+    .eq("id", workflowId)
     .eq("user_id", user.id);
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });

@@ -2,12 +2,23 @@
 
 // ============================================
 // History List — Polished list of past workflows
-// Cards with status, duration, agent count, feedback
+// Cards with status, duration, agent count, feedback, delete
 // ============================================
 
+import React, { useState } from "react";
 import { motion } from "framer-motion";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   Clock,
   CheckCircle2,
@@ -19,7 +30,10 @@ import {
   ArrowRight,
   Zap,
   Users,
+  Trash2,
+  Sparkles,
 } from "lucide-react";
+import { toast } from "sonner";
 
 interface HistoryListProps {
   workflows: any[];
@@ -53,6 +67,11 @@ function formatDuration(start: string, end?: string): string {
 }
 
 export function HistoryList({ workflows, runs }: HistoryListProps) {
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [workflowToDelete, setWorkflowToDelete] = useState<{ id: string; title: string } | null>(null);
+  const router = useRouter();
+
   // Build a map of run counts and feedback per workflow
   const runMap: Record<string, { count: number; feedback: string[]; duration?: string }> = {};
   runs.forEach((run: any) => {
@@ -63,6 +82,36 @@ export function HistoryList({ workflows, runs }: HistoryListProps) {
       runMap[run.workflow_id].duration = formatDuration(run.started_at, run.completed_at);
     }
   });
+
+  // Delete workflow handler
+  const handleDelete = async () => {
+    if (!workflowToDelete) return;
+    setDeletingId(workflowToDelete.id);
+
+    try {
+      const response = await fetch(`/api/workflow?id=${workflowToDelete.id}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Failed to delete");
+
+      toast.success("Workflow deleted");
+      setDeleteDialogOpen(false);
+      setWorkflowToDelete(null);
+      router.refresh();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to delete workflow");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const openDeleteDialog = (e: React.MouseEvent, workflow: { id: string; title: string }) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setWorkflowToDelete(workflow);
+    setDeleteDialogOpen(true);
+  };
 
   return (
     <motion.div
@@ -82,10 +131,16 @@ export function HistoryList({ workflows, runs }: HistoryListProps) {
 
       {workflows.length === 0 ? (
         <div className="glass rounded-xl p-12 text-center">
-          <History className="h-10 w-10 text-muted-foreground mx-auto mb-4" />
-          <p className="text-muted-foreground mb-2">No workflows yet</p>
-          <Link href="/dashboard" className="text-primary text-sm hover:underline">
-            Go create your first workflow
+          <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 mb-4">
+            <Sparkles className="h-8 w-8 text-primary" />
+          </div>
+          <h3 className="font-medium mb-2">No workflows yet</h3>
+          <p className="text-muted-foreground text-sm mb-4">Your workflow history will appear here once you create and run your first workflow.</p>
+          <Link href="/dashboard">
+            <Button variant="outline" size="sm" className="gap-2">
+              <Zap className="h-3.5 w-3.5" />
+              Create your first workflow
+            </Button>
           </Link>
         </div>
       ) : (
@@ -152,7 +207,17 @@ export function HistoryList({ workflows, runs }: HistoryListProps) {
                         <span className="text-xs text-muted-foreground">
                           {new Date(workflow.created_at).toLocaleDateString()}
                         </span>
-                        <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                        <div className="flex items-center gap-1">
+                          <motion.button
+                            whileHover={{ scale: 1.2 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={(e) => openDeleteDialog(e, { id: workflow.id, title: workflow.title })}
+                            className="h-7 w-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </motion.button>
+                          <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
+                        </div>
                       </div>
                     </div>
                   </motion.div>
@@ -162,6 +227,45 @@ export function HistoryList({ workflows, runs }: HistoryListProps) {
           })}
         </motion.div>
       )}
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Workflow</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &quot;{workflowToDelete?.title}&quot;? This will also delete all associated runs and results. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialogOpen(false)}
+              disabled={!!deletingId}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={!!deletingId}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deletingId ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </motion.div>
   );
 }

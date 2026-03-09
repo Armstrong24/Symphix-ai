@@ -5,13 +5,21 @@
 // Stats, quick actions, recent workflows
 // ============================================
 
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { createClient } from "@/lib/supabase/client";
 import {
   Plus,
@@ -25,6 +33,13 @@ import {
   MicOff,
   Sparkles,
   TrendingUp,
+  Trash2,
+  Search,
+  FileText,
+  Calendar,
+  Mail,
+  BarChart3,
+  MessageSquare,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -55,10 +70,23 @@ const statusConfig: Record<string, { color: string; icon: any; label: string }> 
   cancelled: { color: "text-muted-foreground", icon: XCircle, label: "Cancelled" },
 };
 
+// Suggestion chips for quick prompts
+const suggestionChips = [
+  { label: "Research & Blog", icon: Search, prompt: "Research the latest trends in AI and write a detailed blog post about it" },
+  { label: "Email Campaign", icon: Mail, prompt: "Draft an email campaign for our new product launch, including subject lines and body copy" },
+  { label: "Weekly Report", icon: BarChart3, prompt: "Analyze this week's performance metrics and create a summary report with key insights" },
+  { label: "Social Media Plan", icon: MessageSquare, prompt: "Create a week-long social media content plan for a tech startup" },
+  { label: "Meeting Prep", icon: Calendar, prompt: "Research our competitor's latest product updates and prepare briefing notes for tomorrow's strategy meeting" },
+  { label: "Content Rewrite", icon: FileText, prompt: "Rewrite our landing page copy to be more engaging and conversion-focused" },
+];
+
 export function DashboardHome({ workflows, runs, userName }: DashboardHomeProps) {
   const [prompt, setPrompt] = useState("");
   const [isCreating, setIsCreating] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [workflowToDelete, setWorkflowToDelete] = useState<{ id: string; title: string } | null>(null);
   const recognitionRef = useRef<any>(null);
   const router = useRouter();
 
@@ -147,6 +175,36 @@ export function DashboardHome({ workflows, runs, userName }: DashboardHomeProps)
     }
   };
 
+  // Delete workflow handler
+  const handleDelete = async () => {
+    if (!workflowToDelete) return;
+    setDeletingId(workflowToDelete.id);
+
+    try {
+      const response = await fetch(`/api/workflow?id=${workflowToDelete.id}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Failed to delete");
+
+      toast.success("Workflow deleted");
+      setDeleteDialogOpen(false);
+      setWorkflowToDelete(null);
+      router.refresh();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to delete workflow");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const openDeleteDialog = (e: React.MouseEvent, workflow: { id: string; title: string }) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setWorkflowToDelete(workflow);
+    setDeleteDialogOpen(true);
+  };
+
   const completedCount = workflows.filter((w) => w.status === "completed").length;
   const runningCount = workflows.filter((w) => w.status === "running").length;
 
@@ -178,6 +236,22 @@ export function DashboardHome({ workflows, runs, userName }: DashboardHomeProps)
               <h2 className="text-lg font-semibold">Orchestrate a Workflow</h2>
               <p className="text-sm text-muted-foreground">Describe what you need in plain English — or use your voice</p>
             </div>
+          </div>
+
+          {/* Suggestion chips */}
+          <div className="flex flex-wrap gap-2 mb-4">
+            {suggestionChips.map((chip) => (
+              <motion.button
+                key={chip.label}
+                whileHover={{ scale: 1.04, y: -1 }}
+                whileTap={{ scale: 0.97 }}
+                onClick={() => setPrompt(chip.prompt)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium bg-muted/50 text-muted-foreground border border-border/50 hover:border-primary/30 hover:text-primary hover:bg-primary/5 transition-colors"
+              >
+                <chip.icon className="h-3 w-3" />
+                {chip.label}
+              </motion.button>
+            ))}
           </div>
 
           <div className="relative mb-4">
@@ -240,8 +314,11 @@ export function DashboardHome({ workflows, runs, userName }: DashboardHomeProps)
             </motion.div>
           </div>
 
-          <p className="mt-3 text-xs text-muted-foreground text-center">
-            Press Ctrl+Enter to orchestrate
+          <p className="mt-3 text-xs text-muted-foreground text-center flex items-center justify-center gap-2">
+            <kbd className="px-1.5 py-0.5 rounded bg-muted/80 border border-border text-[10px] font-mono">Ctrl</kbd>
+            <span>+</span>
+            <kbd className="px-1.5 py-0.5 rounded bg-muted/80 border border-border text-[10px] font-mono">Enter</kbd>
+            <span>to orchestrate</span>
           </p>
         </div>
       </motion.div>
@@ -281,8 +358,27 @@ export function DashboardHome({ workflows, runs, userName }: DashboardHomeProps)
 
         {workflows.length === 0 ? (
           <div className="glass rounded-xl p-12 text-center">
-            <Zap className="h-10 w-10 text-muted-foreground mx-auto mb-4" />
-            <p className="text-muted-foreground">No workflows yet. Create your first one above!</p>
+            <div className="inline-flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 mb-4">
+              <Sparkles className="h-8 w-8 text-primary" />
+            </div>
+            <h3 className="font-medium mb-2">No workflows yet</h3>
+            <p className="text-muted-foreground text-sm mb-4 max-w-xs mx-auto">
+              Describe a task above and let Symphix assemble the perfect AI agent team for you.
+            </p>
+            <div className="flex flex-wrap justify-center gap-2">
+              {suggestionChips.slice(0, 3).map((chip) => (
+                <button
+                  key={chip.label}
+                  onClick={() => {
+                    setPrompt(chip.prompt);
+                    window.scrollTo({ top: 0, behavior: "smooth" });
+                  }}
+                  className="text-xs text-primary hover:underline"
+                >
+                  Try: {chip.label}
+                </button>
+              ))}
+            </div>
           </div>
         ) : (
           <div className="space-y-3">
@@ -318,6 +414,14 @@ export function DashboardHome({ workflows, runs, userName }: DashboardHomeProps)
                           <span className="text-xs text-muted-foreground">
                             {new Date(workflow.created_at).toLocaleDateString()}
                           </span>
+                          <motion.button
+                            whileHover={{ scale: 1.2 }}
+                            whileTap={{ scale: 0.9 }}
+                            onClick={(e) => openDeleteDialog(e, { id: workflow.id, title: workflow.title })}
+                            className="h-7 w-7 rounded-lg flex items-center justify-center text-muted-foreground hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </motion.button>
                           <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity" />
                         </div>
                       </div>
@@ -329,6 +433,45 @@ export function DashboardHome({ workflows, runs, userName }: DashboardHomeProps)
           </div>
         )}
       </motion.div>
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Workflow</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &quot;{workflowToDelete?.title}&quot;? This will also delete all associated runs and results. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialogOpen(false)}
+              disabled={!!deletingId}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={!!deletingId}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {deletingId ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </motion.div>
   );
 }

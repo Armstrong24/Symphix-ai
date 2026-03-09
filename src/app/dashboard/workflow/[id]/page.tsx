@@ -6,7 +6,7 @@
 // ============================================
 
 import { useEffect, useState, useCallback } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { createClient } from "@/lib/supabase/client";
 import { AgentCard } from "@/components/workflow/agent-card";
@@ -16,6 +16,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import ReactMarkdown from "react-markdown";
 import {
   Play,
@@ -27,6 +35,8 @@ import {
   Copy,
   Download,
   RefreshCw,
+  Trash2,
+  AlertTriangle,
 } from "lucide-react";
 import { toast } from "sonner";
 import Link from "next/link";
@@ -47,6 +57,7 @@ const itemVariants = {
 
 export default function WorkflowDetailPage() {
   const params = useParams();
+  const router = useRouter();
   const workflowId = params.id as string;
 
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
@@ -57,6 +68,8 @@ export default function WorkflowDetailPage() {
   const [results, setResults] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [progress, setProgress] = useState(0);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Fetch workflow on mount
   useEffect(() => {
@@ -186,15 +199,69 @@ export default function WorkflowDetailPage() {
     toast.success("Exported as Markdown!");
   };
 
+  // Delete workflow handler
+  const handleDelete = async () => {
+    if (!workflow) return;
+    setIsDeleting(true);
+
+    try {
+      const response = await fetch(`/api/workflow?id=${workflow.id}`, {
+        method: "DELETE",
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Failed to delete");
+
+      toast.success("Workflow deleted");
+      router.push("/dashboard");
+      router.refresh();
+    } catch (err: any) {
+      toast.error(err.message || "Failed to delete workflow");
+    } finally {
+      setIsDeleting(false);
+      setDeleteDialogOpen(false);
+    }
+  };
+
+  // Auto-detect stuck workflows (running > 5 min)
+  const isStuck = workflow?.status === "running" && workflow?.created_at &&
+    (Date.now() - new Date(workflow.created_at).getTime() > 5 * 60 * 1000);
+
   if (loading) {
     return (
       <div className="max-w-5xl mx-auto space-y-6">
-        <Skeleton className="h-8 w-64 bg-muted" />
-        <Skeleton className="h-4 w-96 bg-muted" />
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {[1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-40 bg-muted rounded-xl" />
-          ))}
+        {/* Header skeleton */}
+        <div className="flex items-center gap-3">
+          <Skeleton className="h-8 w-8 rounded-lg bg-muted" />
+          <Skeleton className="h-8 w-64 bg-muted rounded-lg" />
+          <Skeleton className="h-6 w-20 bg-muted rounded-full" />
+        </div>
+        <Skeleton className="h-4 w-96 bg-muted rounded-lg ml-11" />
+
+        {/* Action buttons skeleton */}
+        <div className="flex justify-end gap-2">
+          <Skeleton className="h-9 w-20 bg-muted rounded-lg" />
+          <Skeleton className="h-9 w-28 bg-muted rounded-lg" />
+        </div>
+
+        {/* Agent cards skeleton */}
+        <div>
+          <Skeleton className="h-6 w-40 bg-muted rounded-lg mb-4" />
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="glass rounded-xl p-5 space-y-3">
+                <div className="flex items-center gap-3">
+                  <Skeleton className="h-10 w-10 rounded-xl bg-muted" />
+                  <div className="space-y-2 flex-1">
+                    <Skeleton className="h-4 w-24 bg-muted rounded" />
+                    <Skeleton className="h-3 w-16 bg-muted rounded" />
+                  </div>
+                </div>
+                <Skeleton className="h-3 w-full bg-muted rounded" />
+                <Skeleton className="h-3 w-3/4 bg-muted rounded" />
+                <Skeleton className="h-3 w-1/2 bg-muted rounded" />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
     );
@@ -264,6 +331,18 @@ export default function WorkflowDetailPage() {
               </motion.div>
             </>
           )}
+          {/* Delete button */}
+          <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setDeleteDialogOpen(true)}
+              className="gap-2 text-muted-foreground hover:text-red-400 hover:border-red-400/50"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete
+            </Button>
+          </motion.div>
           <motion.div whileHover={{ scale: 1.03 }} whileTap={{ scale: 0.97 }}>
             <Button
               onClick={handleRun}
@@ -287,6 +366,36 @@ export default function WorkflowDetailPage() {
           </motion.div>
         </div>
       </motion.div>
+
+      {/* Stuck workflow warning */}
+      <AnimatePresence>
+        {isStuck && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: "auto" }}
+            exit={{ opacity: 0, height: 0 }}
+            className="mb-6"
+          >
+            <div className="glass rounded-xl p-4 border border-yellow-500/30 bg-yellow-500/5">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className="h-5 w-5 text-yellow-500 shrink-0" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-yellow-500">This workflow appears to be stuck</p>
+                  <p className="text-xs text-muted-foreground mt-1">It has been running for over 5 minutes. You can delete it and try again.</p>
+                </div>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setDeleteDialogOpen(true)}
+                  className="shrink-0 text-yellow-500 border-yellow-500/30 hover:bg-yellow-500/10"
+                >
+                  Delete & Retry
+                </Button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Progress bar during execution */}
       <AnimatePresence>
@@ -378,6 +487,45 @@ export default function WorkflowDetailPage() {
           <FeedbackButtons runId={runId} />
         </motion.div>
       )}
+
+      {/* Delete Confirmation Dialog */}
+      <Dialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete Workflow</DialogTitle>
+            <DialogDescription>
+              Are you sure you want to delete &quot;{workflow?.title}&quot;? This will also delete all associated runs and results. This action cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setDeleteDialogOpen(false)}
+              disabled={isDeleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={handleDelete}
+              disabled={isDeleting}
+              className="bg-red-600 hover:bg-red-700 text-white"
+            >
+              {isDeleting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Deleting...
+                </>
+              ) : (
+                <>
+                  <Trash2 className="mr-2 h-4 w-4" />
+                  Delete
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </motion.div>
   );
 }
