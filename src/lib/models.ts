@@ -15,7 +15,7 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 export function getLLM(options?: { maxOutputTokens?: number; temperature?: number }) {
   return new ChatGoogleGenerativeAI({
     apiKey: process.env.GOOGLE_GEMINI_API_KEY,
-    model: "gemini-2.5-flash-preview-05-20",
+    model: "gemini-2.5-flash",
     temperature: options?.temperature ?? 0.3,
     maxOutputTokens: options?.maxOutputTokens ?? 2048,
   });
