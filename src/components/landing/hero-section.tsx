@@ -1,170 +1,216 @@
 "use client";
 
-// ============================================
-// Hero Section — The grand opening of Symphix
-// Animated gradient text, floating agents, particles
-// ============================================
-
 import { motion } from "framer-motion";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
-import {
-  Zap,
-  Mail,
-  Search,
-  Calendar,
-  Share2,
-  PenTool,
-  BarChart3,
-  ArrowRight,
-} from "lucide-react";
+import { ArrowRight } from "lucide-react";
 
-const floatingAgents = [
-  { icon: Mail, label: "Email", color: "#00f0ff", x: -200, y: -80, delay: 0 },
-  { icon: Search, label: "Research", color: "#a855f7", x: 220, y: -60, delay: 0.2 },
-  { icon: Calendar, label: "Schedule", color: "#22c55e", x: -260, y: 80, delay: 0.4 },
-  { icon: Share2, label: "Social", color: "#f97316", x: 260, y: 100, delay: 0.6 },
-  { icon: PenTool, label: "Writer", color: "#ec4899", x: -120, y: 160, delay: 0.8 },
-  { icon: BarChart3, label: "Analyst", color: "#eab308", x: 130, y: 170, delay: 1.0 },
-];
+// Animated wireframe/mesh SVG — abstract neural network visualization
+function HeroArt() {
+  const nodes = [
+    { cx: 200, cy: 120, r: 4 },
+    { cx: 320, cy: 80, r: 3 },
+    { cx: 380, cy: 180, r: 5 },
+    { cx: 260, cy: 220, r: 3.5 },
+    { cx: 150, cy: 250, r: 4 },
+    { cx: 340, cy: 300, r: 3 },
+    { cx: 420, cy: 120, r: 3.5 },
+    { cx: 180, cy: 180, r: 3 },
+    { cx: 300, cy: 160, r: 6 },
+    { cx: 240, cy: 320, r: 4 },
+    { cx: 400, cy: 260, r: 3.5 },
+    { cx: 120, cy: 340, r: 3 },
+    { cx: 460, cy: 200, r: 4 },
+    { cx: 280, cy: 60, r: 3 },
+    { cx: 360, cy: 350, r: 3.5 },
+  ];
 
-const containerVariants = {
-  hidden: { opacity: 0 },
-  visible: {
-    opacity: 1,
-    transition: { staggerChildren: 0.15, delayChildren: 0.3 },
-  },
-};
+  const edges: [number, number][] = [
+    [0, 1], [0, 7], [0, 8], [1, 8], [1, 6], [1, 13],
+    [2, 6], [2, 8], [2, 10], [2, 12], [3, 4], [3, 8],
+    [3, 9], [4, 7], [4, 11], [5, 9], [5, 10], [5, 14],
+    [6, 12], [6, 13], [7, 0], [8, 3], [9, 11], [10, 14],
+  ];
 
-const itemVariants = {
-  hidden: { opacity: 0, y: 30 },
-  visible: { opacity: 1, y: 0, transition: { duration: 0.6, ease: "easeOut" as const } },
-};
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 1.2, ease: "easeOut" as const, delay: 0.3 }}
+      className="relative w-full h-full flex items-center justify-center"
+    >
+      <div className="absolute inset-0 hero-blob" />
+
+      <svg
+        viewBox="0 0 560 420"
+        className="w-full h-auto max-w-[560px]"
+        fill="none"
+      >
+        {/* Edges */}
+        {edges.map(([from, to], i) => (
+          <motion.line
+            key={`edge-${i}`}
+            x1={nodes[from].cx}
+            y1={nodes[from].cy}
+            x2={nodes[to].cx}
+            y2={nodes[to].cy}
+            stroke="currentColor"
+            className="text-foreground/10"
+            strokeWidth={0.8}
+            initial={{ pathLength: 0, opacity: 0 }}
+            animate={{ pathLength: 1, opacity: 1 }}
+            transition={{
+              duration: 1.5,
+              delay: 0.6 + i * 0.05,
+              ease: "easeOut" as const,
+            }}
+          />
+        ))}
+
+        {/* Nodes */}
+        {nodes.map((node, i) => (
+          <motion.circle
+            key={`node-${i}`}
+            cx={node.cx}
+            cy={node.cy}
+            r={node.r}
+            className="fill-primary/60"
+            initial={{ scale: 0, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{
+              duration: 0.5,
+              delay: 0.8 + i * 0.06,
+              ease: "easeOut" as const,
+            }}
+          />
+        ))}
+
+        {/* Central glowing node */}
+        <motion.circle
+          cx={300}
+          cy={160}
+          r={12}
+          className="fill-primary/20"
+          initial={{ scale: 0 }}
+          animate={{ scale: [1, 1.4, 1] }}
+          transition={{
+            duration: 3,
+            repeat: Infinity,
+            ease: "easeInOut" as const,
+            delay: 1.5,
+          }}
+        />
+        <motion.circle
+          cx={300}
+          cy={160}
+          r={8}
+          className="fill-primary/40"
+          initial={{ scale: 0, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          transition={{ duration: 0.6, delay: 1.2 }}
+        />
+
+        {/* Data pulses traveling along edges */}
+        {[0, 4, 8, 12, 18].map((edgeIdx, i) => {
+          const [from, to] = edges[edgeIdx];
+          return (
+            <motion.circle
+              key={`pulse-${i}`}
+              r={2}
+              className="fill-primary"
+              initial={{ opacity: 0 }}
+              animate={{
+                cx: [nodes[from].cx, nodes[to].cx],
+                cy: [nodes[from].cy, nodes[to].cy],
+                opacity: [0, 1, 1, 0],
+              }}
+              transition={{
+                duration: 2.5,
+                delay: 2 + i * 0.8,
+                repeat: Infinity,
+                repeatDelay: 3,
+                ease: "easeInOut" as const,
+              }}
+            />
+          );
+        })}
+      </svg>
+    </motion.div>
+  );
+}
 
 export function HeroSection() {
   return (
-    <section className="relative min-h-screen flex items-center justify-center overflow-hidden bg-grid">
-      {/* Radial glow background */}
+    <section className="relative min-h-screen flex items-center overflow-hidden pt-16">
+      {/* Subtle gradient bg */}
       <div className="absolute inset-0 pointer-events-none">
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full bg-neon-cyan/5 blur-[120px]" />
-        <div className="absolute top-1/3 left-1/3 w-[600px] h-[600px] rounded-full bg-neon-purple/5 blur-[100px]" />
+        <div className="absolute top-0 right-0 w-[60%] h-[80%] hero-blob opacity-60" />
       </div>
 
-      {/* Floating agent avatars — orbit around the center */}
-      <div className="absolute inset-0 pointer-events-none">
-        {floatingAgents.map((agent, i) => (
-          <motion.div
-            key={agent.label}
-            className="absolute top-1/2 left-1/2 hidden md:flex items-center gap-2"
-            initial={{ opacity: 0, scale: 0 }}
-            animate={{
-              opacity: [0, 0.7, 0.5],
-              scale: 1,
-              x: agent.x,
-              y: agent.y,
-            }}
-            transition={{
-              duration: 1.2,
-              delay: agent.delay + 0.5,
-              ease: "easeOut",
-            }}
-          >
+      <div className="relative z-10 mx-auto max-w-7xl w-full px-4 sm:px-6 lg:px-8 py-20 lg:py-0">
+        <div className="grid lg:grid-cols-2 gap-12 lg:gap-8 items-center">
+          {/* Left copy */}
+          <div>
             <motion.div
-              animate={{ y: [0, -8, 0] }}
-              transition={{
-                duration: 3 + i * 0.5,
-                repeat: Infinity,
-                ease: "easeInOut",
-              }}
-              className="glass rounded-xl px-3 py-2 flex items-center gap-2"
-              style={{ borderColor: `${agent.color}30` }}
+              initial={{ opacity: 0, y: 30 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.7, ease: "easeOut" as const }}
             >
-              <agent.icon className="h-4 w-4" style={{ color: agent.color }} />
-              <span className="text-xs text-muted-foreground">{agent.label}</span>
+              <h1 className="text-4xl sm:text-5xl lg:text-6xl xl:text-7xl font-bold tracking-tight leading-[1.08]">
+                Where Prompts
+                <br />
+                <span className="text-gradient">Become Teams</span>
+              </h1>
             </motion.div>
+
+            <motion.p
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.7, delay: 0.15, ease: "easeOut" as const }}
+              className="mt-6 text-base sm:text-lg text-muted-foreground max-w-lg leading-relaxed"
+            >
+              A unified platform for orchestrating AI agents that handle your
+              emails, research, scheduling, and content — all from a single prompt.
+            </motion.p>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.7, delay: 0.3, ease: "easeOut" as const }}
+              className="mt-8 flex flex-col sm:flex-row gap-3"
+            >
+              <Link href="/auth/signup">
+                <Button
+                  size="lg"
+                  className="bg-foreground text-background hover:bg-foreground/90 font-medium px-6 h-11 text-sm rounded-lg"
+                >
+                  Get Started
+                </Button>
+              </Link>
+              <a href="#how-it-works">
+                <Button
+                  variant="outline"
+                  size="lg"
+                  className="h-11 text-sm rounded-lg px-6 font-medium"
+                >
+                  See How It Works
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Button>
+              </a>
+            </motion.div>
+          </div>
+
+          {/* Right abstract art */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 1, delay: 0.2 }}
+            className="hidden lg:block h-[480px]"
+          >
+            <HeroArt />
           </motion.div>
-        ))}
+        </div>
       </div>
-
-      {/* Main hero content */}
-      <motion.div
-        variants={containerVariants}
-        initial="hidden"
-        animate="visible"
-        className="relative z-10 mx-auto max-w-4xl px-4 text-center"
-      >
-        {/* Badge */}
-        <motion.div variants={itemVariants} className="mb-6 inline-flex">
-          <span className="glass rounded-full px-4 py-1.5 text-xs font-medium text-neon-cyan border border-neon-cyan/20">
-            <Zap className="inline h-3 w-3 mr-1" />
-            AI Agent Orchestration Platform
-          </span>
-        </motion.div>
-
-        {/* Headline */}
-        <motion.h1
-          variants={itemVariants}
-          className="text-5xl sm:text-6xl lg:text-7xl font-bold tracking-tight leading-tight"
-        >
-          One Prompt.{" "}
-          <span className="text-gradient">Your AI Agents</span>
-          <br />
-          in Perfect Harmony.
-        </motion.h1>
-
-        {/* Subheading */}
-        <motion.p
-          variants={itemVariants}
-          className="mt-6 text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto"
-        >
-          Turn a single sentence into a team of specialized AI agents that handle your
-          emails, research, scheduling, and social media — all orchestrated automatically.
-        </motion.p>
-
-        {/* CTA buttons */}
-        <motion.div
-          variants={itemVariants}
-          className="mt-10 flex flex-col sm:flex-row items-center justify-center gap-4"
-        >
-          <Link href="/auth/signup">
-            <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
-              <Button
-                size="lg"
-                className="bg-neon-cyan text-black font-semibold hover:bg-neon-cyan/80 glow-cyan px-8 h-12 text-base"
-              >
-                Start Orchestrating
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Button>
-            </motion.div>
-          </Link>
-          <Link href="/auth/login">
-            <Button
-              variant="outline"
-              size="lg"
-              className="border-border h-12 text-base"
-            >
-              Sign In
-            </Button>
-          </Link>
-        </motion.div>
-
-        {/* Feature pills */}
-        <motion.div
-          variants={itemVariants}
-          className="mt-16 flex flex-wrap justify-center gap-3"
-        >
-          {["Email Automation", "Web Research", "Smart Scheduling", "Social Posting", "Content Writing", "Data Analysis"].map(
-            (feature) => (
-              <span
-                key={feature}
-                className="glass rounded-full px-4 py-1.5 text-xs text-muted-foreground"
-              >
-                {feature}
-              </span>
-            )
-          )}
-        </motion.div>
-      </motion.div>
     </section>
   );
 }
