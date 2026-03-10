@@ -1,40 +1,26 @@
 // ============================================
 // Symphix Orchestra — LangGraph.js Agent Orchestration
 // The conductor that turns one prompt into a team of agents
-// Now with REAL tool-calling: web search, email, scheduling, etc.
-// Optimized for Vercel 60s timeout + Groq free tier rate limits
+// Real tool-calling with streaming support via Google Gemini 2.5 Flash
 // ============================================
 
-import { ChatGroq } from "@langchain/groq";
 import { HumanMessage, SystemMessage, ToolMessage } from "@langchain/core/messages";
 import type { BaseMessage } from "@langchain/core/messages";
 import type { AgentType, Agent, LogEntry } from "@/types";
 import { AGENT_CONFIG } from "@/types";
 import { getToolsForAgent } from "@/lib/tools";
+import { getLLM } from "@/lib/models";
 
 // ============================================
-// LLM Setup — Use 8B model for EVERYTHING
-// The 70B model has very tight Groq free-tier rate limits
-// (6K tokens/min) which causes 429 errors with parallel agents.
-// The 8B model has 131K tokens/min — 20x more headroom.
-// ============================================
-
-function getLLM() {
-  return new ChatGroq({
-    apiKey: process.env.GROQ_API_KEY,
-    model: "llama-3.1-8b-instant",
-    temperature: 0.3,
-    maxTokens: 2048,
-  });
-}
-
 // Generate a simple UUID using crypto
+// ============================================
+
 function generateId(): string {
   return crypto.randomUUID();
 }
 
 // ============================================
-// Retry helper — handles Groq 429 rate limit errors
+// Retry helper — handles rate limit errors
 // ============================================
 
 async function withRetry<T>(
@@ -52,10 +38,10 @@ async function withRetry<T>(
         error?.status === 429 ||
         error?.message?.includes("429") ||
         error?.message?.includes("rate limit") ||
-        error?.message?.includes("Rate limit");
-      
+        error?.message?.includes("Rate limit") ||
+        error?.message?.includes("RESOURCE_EXHAUSTED");
+
       if (isRateLimit && attempt < maxRetries) {
-        // Exponential backoff: 2s, 4s
         const delay = baseDelay * Math.pow(2, attempt);
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
@@ -101,7 +87,7 @@ interface ConductorResult {
 }
 
 export async function conductorAnalyze(description: string): Promise<ConductorResult> {
-  const llm = getLLM();
+  const llm = getLLM({ maxOutputTokens: 512, temperature: 0.2 });
 
   const systemPrompt = `You are the Symphix Conductor. Break down user requests into specialized AI agents.
 
@@ -182,8 +168,7 @@ export function buildAgents(conductorResult: ConductorResult): Agent[] {
 }
 
 // ============================================
-// Step 3: Execute individual agent WITH tool-calling
-// Max 2 tool iterations to stay fast. 45s hard timeout.
+// Agent System Prompts
 // ============================================
 
 const agentSystemPrompts: Record<string, string> = {
@@ -215,6 +200,11 @@ Present findings with executive summary, key metrics, and recommendations.`,
   custom: `You are a Symphix AI Agent. Complete the task using available tools.
 Be specific and actionable. Use tools when helpful.`,
 };
+
+// ============================================
+// Step 3: Execute individual agent WITH tool-calling (non-streaming)
+// Max 2 tool iterations to stay fast. 45s hard timeout.
+// ============================================
 
 export async function executeAgent(
   agent: Agent,
@@ -351,14 +341,177 @@ export async function executeAgent(
   } catch (error: any) {
     const errorMsg = error.message || "Unknown error";
     onLog(makeLog(`Error: ${errorMsg}`, "error"));
-    // Return a partial result instead of throwing — keeps the workflow alive
     return `Agent encountered an error: ${errorMsg}. The task "${agent.description}" could not be fully completed.`;
   }
 }
 
 // ============================================
-// Step 4: Full orchestration (used by old single-call path, kept for reference)
-// The new architecture calls conductorAnalyze + executeAgent separately.
+// Step 3b: Execute agent with STREAMING output
+// Yields SSE events: { type: "log" | "token" | "done" | "error", data: ... }
+// The final response text is streamed token-by-token.
+// Tool-calling iterations still use non-streaming invoke.
+// ============================================
+
+export async function* executeAgentStream(
+  agent: Agent,
+  workflowDescription: string,
+  previousResults: string[]
+): AsyncGenerator<{ type: "log" | "token" | "done" | "error"; data: string }> {
+  const llm = getLLM();
+  const tools = getToolsForAgent(agent.type);
+
+  const makeLog = (message: string, logType: LogEntry["type"] = "info"): LogEntry => ({
+    id: generateId(),
+    timestamp: new Date().toISOString(),
+    agentId: agent.id,
+    agentName: agent.name,
+    message,
+    type: logType,
+  });
+
+  yield { type: "log", data: JSON.stringify(makeLog(`Starting: ${agent.description}`, "info")) };
+
+  const systemPrompt = agentSystemPrompts[agent.type] || agentSystemPrompts.custom;
+
+  const contextMessage =
+    previousResults.length > 0
+      ? `\n\nContext from other agents:\n${previousResults.map((r) => r.slice(0, 300)).join("\n---\n")}`
+      : "";
+
+  try {
+    const llmWithTools = tools.length > 0 ? llm.bindTools(tools) : llm;
+
+    const messages: BaseMessage[] = [
+      new SystemMessage(systemPrompt),
+      new HumanMessage(
+        `Task: ${agent.description}\nContext: ${workflowDescription}${contextMessage}\n\nComplete this task now. Be concise but thorough.`
+      ),
+    ];
+
+    let iterations = 0;
+    const maxIterations = 2;
+    let needsFinalStream = true;
+
+    while (iterations < maxIterations) {
+      iterations++;
+
+      yield {
+        type: "log",
+        data: JSON.stringify(
+          makeLog(iterations === 1 ? "Thinking..." : "Processing tool results...", "thinking")
+        ),
+      };
+
+      // First pass: use non-streaming invoke to check for tool calls
+      const response = await withRetry(() =>
+        withTimeout(
+          llmWithTools.invoke(messages),
+          30000,
+          `${agent.name} LLM call`
+        )
+      );
+      messages.push(response);
+
+      const toolCalls = response.tool_calls;
+
+      if (!toolCalls || toolCalls.length === 0) {
+        // No tool calls — this iteration produced the final text.
+        // We already have the full text from invoke. Stream it token-by-token
+        // by splitting into words for a nice streaming effect.
+        const fullText = typeof response.content === "string" ? response.content : "";
+        const words = fullText.split(/(\s+)/);
+        for (const word of words) {
+          if (word) {
+            yield { type: "token", data: word };
+          }
+        }
+        needsFinalStream = false;
+        break;
+      }
+
+      // Execute tool calls
+      const callsToProcess = toolCalls.slice(0, 2);
+      for (const toolCall of callsToProcess) {
+        const toolName = toolCall.name;
+        const toolArgs = toolCall.args;
+
+        yield { type: "log", data: JSON.stringify(makeLog(`Using tool: ${toolName}`, "tool_call")) };
+
+        const matchedTool = tools.find((t) => t.name === toolName);
+        if (!matchedTool) {
+          messages.push(
+            new ToolMessage({
+              content: JSON.stringify({ error: `Tool ${toolName} not found` }),
+              tool_call_id: toolCall.id!,
+            })
+          );
+          yield { type: "log", data: JSON.stringify(makeLog(`Tool not found: ${toolName}`, "error")) };
+          continue;
+        }
+
+        try {
+          const toolResult = await withTimeout(
+            (matchedTool as any).invoke(toolArgs),
+            15000,
+            `Tool ${toolName}`
+          );
+          const resultStr = typeof toolResult === "string" ? toolResult : JSON.stringify(toolResult);
+          messages.push(new ToolMessage({ content: resultStr, tool_call_id: toolCall.id! }));
+          yield { type: "log", data: JSON.stringify(makeLog(`Tool ${toolName} completed`, "success")) };
+        } catch (toolError: any) {
+          const errorMsg = toolError.message || "Tool failed";
+          messages.push(
+            new ToolMessage({
+              content: JSON.stringify({ error: errorMsg }),
+              tool_call_id: toolCall.id!,
+            })
+          );
+          yield { type: "log", data: JSON.stringify(makeLog(`Tool error: ${errorMsg}`, "error")) };
+        }
+      }
+
+      for (const skippedCall of toolCalls.slice(2)) {
+        messages.push(
+          new ToolMessage({
+            content: JSON.stringify({ error: "Skipped — tool call limit reached" }),
+            tool_call_id: skippedCall.id!,
+          })
+        );
+      }
+    }
+
+    // If we used all iterations on tool calls, stream the final summary
+    if (needsFinalStream) {
+      yield { type: "log", data: JSON.stringify(makeLog("Generating final summary...", "thinking")) };
+
+      // Use real streaming for the final response
+      const stream = await llm.stream([
+        ...messages,
+        new HumanMessage("Summarize your work concisely."),
+      ]);
+
+      for await (const chunk of stream) {
+        const text = typeof chunk.content === "string" ? chunk.content : "";
+        if (text) {
+          yield { type: "token", data: text };
+        }
+      }
+    }
+
+    yield { type: "log", data: JSON.stringify(makeLog("Completed!", "success")) };
+    yield { type: "done", data: "" };
+  } catch (error: any) {
+    const errorMsg = error.message || "Unknown error";
+    yield { type: "log", data: JSON.stringify(makeLog(`Error: ${errorMsg}`, "error")) };
+    yield {
+      type: "error",
+      data: `Agent encountered an error: ${errorMsg}. The task "${agent.description}" could not be fully completed.`,
+    };
+  }
+}
+
+// ============================================
+// Step 4: Full orchestration (kept for reference / fallback)
 // ============================================
 
 export async function orchestrate(
@@ -389,7 +542,6 @@ export async function orchestrate(
 
   const results: Record<string, string> = {};
 
-  // Run agents in parallel
   const promises = agents.map(async (agent) => {
     onAgentUpdate(agent.id, { status: "running" });
     try {

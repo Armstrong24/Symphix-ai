@@ -2,10 +2,10 @@
 
 // ============================================
 // Workflow Detail Page — The execution command center
-// Agent cards with pulse, live logs, progress, markdown output
+// Agent cards with pulse, live logs, progress, streaming markdown output
 // ============================================
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { createClient } from "@/lib/supabase/client";
@@ -70,6 +70,11 @@ export default function WorkflowDetailPage() {
   const [progress, setProgress] = useState(0);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  // Track which agents are still streaming (for the cursor blink effect)
+  const [streamingAgents, setStreamingAgents] = useState<Set<string>>(new Set());
+
+  // Ref for auto-scrolling the output section during streaming
+  const outputRef = useRef<HTMLDivElement>(null);
 
   // Fetch workflow on mount
   useEffect(() => {
@@ -148,6 +153,7 @@ export default function WorkflowDetailPage() {
     setResults({});
     setProgress(0);
     setAgents([]);
+    setStreamingAgents(new Set());
 
     try {
       // ── Phase 1: Conductor ──────────────────────────────────
@@ -182,13 +188,16 @@ export default function WorkflowDetailPage() {
         type: "success",
       }]);
 
-      // ── Phase 2: Execute agents with staggered starts ──────
+      // ── Phase 2: Execute agents with SSE streaming ──────────
       // Stagger by 1.5s between each to avoid Groq rate limits
       const totalAgents = runningAgents.length;
       let completedCount = 0;
       const newResults: Record<string, string> = {};
 
       const executeOneAgent = async (agent: Agent) => {
+        // Mark this agent as streaming
+        setStreamingAgents((prev) => new Set(prev).add(agent.id));
+
         try {
           const agentRes = await fetch("/api/workflow/agent", {
             method: "POST",
@@ -201,34 +210,108 @@ export default function WorkflowDetailPage() {
             }),
           });
 
-          const agentData = await safeJsonParse(agentRes);
+          // Check if we got an SSE stream
+          const contentType = agentRes.headers.get("content-type") || "";
 
-          if (!agentRes.ok) {
-            throw new Error(agentData.error || "Agent failed");
+          if (contentType.includes("text/event-stream") && agentRes.body) {
+            // ── Read SSE stream ──
+            const reader = agentRes.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
+            let agentResult = "";
+
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\n");
+              buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+              for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                const jsonStr = line.slice(6).trim();
+                if (!jsonStr) continue;
+
+                try {
+                  const event = JSON.parse(jsonStr);
+
+                  if (event.type === "token") {
+                    agentResult += event.data;
+                    // Update result incrementally
+                    setResults((prev) => ({ ...prev, [agent.id]: agentResult }));
+                    newResults[agent.id] = agentResult;
+                  } else if (event.type === "log") {
+                    try {
+                      const log = JSON.parse(event.data);
+                      setLogs((prev) => [...prev, log]);
+                    } catch {}
+                  } else if (event.type === "error") {
+                    agentResult = event.data || "Agent failed";
+                    setResults((prev) => ({ ...prev, [agent.id]: agentResult }));
+                    newResults[agent.id] = agentResult;
+                  }
+                  // "done" type — stream is complete
+                } catch {
+                  // Ignore unparseable SSE events
+                }
+              }
+            }
+
+            completedCount++;
+            setStreamingAgents((prev) => {
+              const next = new Set(prev);
+              next.delete(agent.id);
+              return next;
+            });
+            setAgents((prev) =>
+              prev.map((a) =>
+                a.id === agent.id ? { ...a, status: "completed", result: agentResult } : a
+              )
+            );
+            setResults((prev) => ({ ...prev, [agent.id]: agentResult }));
+            setProgress(15 + (completedCount / totalAgents) * 85);
+          } else {
+            // ── Fallback: JSON response (non-streaming) ──
+            const agentData = await safeJsonParse(agentRes);
+
+            if (!agentRes.ok) {
+              throw new Error(agentData.error || "Agent failed");
+            }
+
+            newResults[agent.id] = agentData.result;
+            completedCount++;
+
+            setStreamingAgents((prev) => {
+              const next = new Set(prev);
+              next.delete(agent.id);
+              return next;
+            });
+            setAgents((prev) =>
+              prev.map((a) =>
+                a.id === agent.id ? { ...a, status: "completed", result: agentData.result } : a
+              )
+            );
+            setResults((prev) => ({ ...prev, [agent.id]: agentData.result }));
+            setLogs((prev) => [...prev, ...(agentData.logs || [])]);
+            setProgress(15 + (completedCount / totalAgents) * 85);
           }
-
-          newResults[agent.id] = agentData.result;
-          completedCount++;
-
-          setAgents((prev) =>
-            prev.map((a) =>
-              a.id === agent.id ? { ...a, status: "completed", result: agentData.result } : a
-            )
-          );
-          setResults((prev) => ({ ...prev, [agent.id]: agentData.result }));
-          setLogs((prev) => [...prev, ...(agentData.logs || [])]);
-          setProgress(15 + (completedCount / totalAgents) * 85);
         } catch (agentErr: any) {
           completedCount++;
-          // Still show partial result even on error
           const errMsg = agentErr.message || "Agent failed";
           newResults[agent.id] = `Error: ${errMsg}`;
 
+          setStreamingAgents((prev) => {
+            const next = new Set(prev);
+            next.delete(agent.id);
+            return next;
+          });
           setAgents((prev) =>
             prev.map((a) =>
               a.id === agent.id ? { ...a, status: "error", error: errMsg } : a
             )
           );
+          setResults((prev) => ({ ...prev, [agent.id]: `Error: ${errMsg}` }));
           setLogs((prev) => [
             ...prev,
             {
@@ -244,14 +327,13 @@ export default function WorkflowDetailPage() {
         }
       };
 
-      // Launch agents with staggered starts (1.5s apart) to avoid rate limits
-      // All still run concurrently — they just START at different times
+      // Launch agents with staggered starts (1s apart)
       const agentPromises = runningAgents.map((agent: Agent, index: number) =>
         new Promise<void>((resolve) => {
           setTimeout(async () => {
             await executeOneAgent(agent);
             resolve();
-          }, index * 1500); // 0s, 1.5s, 3s stagger
+          }, index * 1000); // 0s, 1s, 2s stagger
         })
       );
 
@@ -297,6 +379,7 @@ export default function WorkflowDetailPage() {
       setProgress(0);
     } finally {
       setIsRunning(false);
+      setStreamingAgents(new Set());
     }
   }, [workflow]);
 
@@ -352,6 +435,9 @@ export default function WorkflowDetailPage() {
   // Auto-detect stuck workflows (running > 5 min)
   const isStuck = workflow?.status === "running" && workflow?.created_at &&
     (Date.now() - new Date(workflow.created_at).getTime() > 5 * 60 * 1000);
+
+  const hasResults = Object.keys(results).length > 0;
+  const hasAnyContent = Object.values(results).some((r) => r.length > 0);
 
   if (loading) {
     return (
@@ -414,7 +500,6 @@ export default function WorkflowDetailPage() {
     failed: { icon: XCircle, color: "text-red-400", label: "Failed" },
   };
   const status = statusConfig[workflow.status] || statusConfig.draft;
-  const hasResults = Object.keys(results).length > 0;
 
   return (
     <motion.div
@@ -442,7 +527,7 @@ export default function WorkflowDetailPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          {hasResults && (
+          {hasResults && !isRunning && (
             <>
               <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
                 <Button variant="outline" size="sm" onClick={handleCopyAll} className="gap-2">
@@ -562,7 +647,7 @@ export default function WorkflowDetailPage() {
                 <AgentCard
                   agent={agent}
                   result={results[agent.id]}
-                  isExpanded={workflow.status === "completed"}
+                  isExpanded={workflow.status === "completed" || !!results[agent.id]}
                 />
               </motion.div>
             ))}
@@ -570,14 +655,18 @@ export default function WorkflowDetailPage() {
         </AnimatePresence>
       </motion.div>
 
-      {/* Rendered blog/content output */}
-      {hasResults && workflow.status === "completed" && (
+      {/* Rendered output — shows DURING streaming too, not just after completion */}
+      {hasAnyContent && (
         <motion.div variants={itemVariants} className="mb-8">
-          <h2 className="text-lg font-semibold mb-4">Output</h2>
-          <div className="glass rounded-2xl p-6 sm:p-8">
+          <h2 className="text-lg font-semibold mb-4">
+            {isRunning ? "Live Output" : "Output"}
+          </h2>
+          <div ref={outputRef} className="glass rounded-2xl p-6 sm:p-8">
             <div className="prose-symphix">
               {Object.entries(results).map(([agentId, result]) => {
+                if (!result) return null;
                 const agent = agents.find((a) => a.id === agentId);
+                const isStreaming = streamingAgents.has(agentId);
                 return (
                   <div key={agentId} className="mb-6 last:mb-0">
                     {agents.length > 1 && (
@@ -586,12 +675,22 @@ export default function WorkflowDetailPage() {
                           className="h-6 w-6 rounded-lg flex items-center justify-center"
                           style={{ backgroundColor: `${agent?.color || "#00f0ff"}15` }}
                         >
-                          <CheckCircle2 className="h-3 w-3" style={{ color: agent?.color || "#00f0ff" }} />
+                          {isStreaming ? (
+                            <Loader2 className="h-3 w-3 animate-spin" style={{ color: agent?.color || "#00f0ff" }} />
+                          ) : (
+                            <CheckCircle2 className="h-3 w-3" style={{ color: agent?.color || "#00f0ff" }} />
+                          )}
                         </div>
                         <span className="text-sm font-medium">{agent?.name || "Agent"}</span>
+                        {isStreaming && (
+                          <span className="text-xs text-muted-foreground animate-pulse">streaming...</span>
+                        )}
                       </div>
                     )}
                     <ReactMarkdown>{result}</ReactMarkdown>
+                    {isStreaming && (
+                      <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-0.5 align-text-bottom" />
+                    )}
                   </div>
                 );
               })}
